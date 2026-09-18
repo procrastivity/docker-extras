@@ -24,8 +24,8 @@ satisfy all of these:
 Mechanics:
 
 - Commits are [Conventional Commits](https://www.conventionalcommits.org)
-  (git-cliff builds the changelog from them); `make hooks` installs the
-  commit-msg hook that enforces it.
+  (git-cliff builds each release's notes from them); `make hooks` installs
+  the pre-commit hooks, including the commit-msg hook that enforces it.
 - Put the executable in `bin/docker-extras-<name>` (no `.sh` suffix, mode 755).
 - Add the name to `TOOLS` in `plugin/docker-extras`.
 - Add a row to the README table, a page in `docs/`, and a harness in `tests/`

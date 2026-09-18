@@ -48,10 +48,15 @@ checkout's `bin/` and falls back to PATH.
 ## Development
 
 ```sh
-make hooks                   # commit-msg hook: commits must be Conventional Commits
+make hooks                   # pre-commit + commit-msg hooks (Conventional Commits)
 make lint                    # shellcheck on bin/, plugin/, contrib/, scripts/, tests/
 make test                    # regression harness (needs a docker daemon; skips without one)
+make check                   # lint + test, the release gate
 ```
+
+With [nix](https://install.determinate.systems) and direnv, `direnv allow`
+loads a dev shell pinning shellcheck, git-cliff, gh, and pre-commit;
+without nix, bring those tools yourself.
 
 Want to add a tool? Read [CONTRIBUTING.md](CONTRIBUTING.md) — the admission
 bar is the point of the collection.
@@ -62,11 +67,15 @@ bar is the point of the collection.
 contrib/release --patch | --minor | --major | vX.Y.Z
 ```
 
-The script gates on `make lint` + `make test`, regenerates
-[CHANGELOG.md](CHANGELOG.md) with [git-cliff](https://github.com/orhun/git-cliff),
-stamps the plugin version, commits `chore(release): vX.Y.Z`, tags, and pushes.
-The tag workflow re-runs the gate and publishes the GitHub Release with
+The script gates on `make check`, generates the release notes with
+[git-cliff](https://github.com/orhun/git-cliff), writes them into the
+annotated tag message, and pushes the branch and the tag. It creates no
+commit, and no CHANGELOG.md is committed: the notes travel in the tag.
+The tag workflow re-runs the gate, builds the assets (`make dist` stamps
+the plugin VERSION from the tag), and publishes the GitHub Release —
+body from the tag message (`--notes-from-tag`), assets
 `docker-extras.tar.gz`, `docker-extras-install.sh`, and `SHA256SUMS`.
+`make changelog` renders a full local changelog into `dist/` on demand.
 
 ## License
 
