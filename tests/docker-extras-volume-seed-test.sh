@@ -34,8 +34,14 @@ fail=0
 
 # No docker, or no daemon behind it: skip rather than fail. A machine with no
 # daemon is not a lint failure, and this harness has no other way to run.
+# REQUIRE_DOCKER=1 turns the skip into a failure — CI sets it, so a runner
+# misconfiguration can never pass the gate having tested nothing.
 if ! command -v docker >/dev/null 2>&1 \
    || ! docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+  if [ "${REQUIRE_DOCKER:-0}" = "1" ]; then
+    say "no docker daemon reachable and REQUIRE_DOCKER=1 — failing"
+    exit 1
+  fi
   say "no docker daemon reachable — skipping (not a failure)"
   exit 0
 fi
