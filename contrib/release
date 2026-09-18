@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# contrib/release — cut a release. Runs the local twin of the CI gate,
+# regenerates CHANGELOG.md for the new tag, stamps the plugin version,
+# commits, tags, and pushes. The tag workflow (.github/workflows/release.yml)
+# re-runs the gate, builds the assets, and creates the GitHub Release.
+set -Eeuo pipefail
+
+DIR=$(cd "$(dirname "${0}")" && pwd)
+PROJECT_ROOT=$(cd "$DIR/.." && pwd)
+cd "$PROJECT_ROOT"
+
+usage() {
+	echo "Usage: contrib/release --major | --minor | --patch | vX.Y.Z"
+	echo
+	echo "Runs make lint + test, regenerates CHANGELOG.md for the new tag,"
+	echo "stamps the plugin dispatcher's VERSION, commits"
+	echo "'chore(release): vX.Y.Z', tags it, and pushes (CI publishes the"
+	echo "release)."
+	exit 1
+}
+
+# Convert the origin remote URL to its https web base, e.g.
+#   git@host:owner/repo.git            -> https://host/owner/repo
+#   ssh://git@host:2222/owner/repo.git -> https://host/owner/repo
+#   https://host/owner/repo.git        -> https://host/owner/repo
+remote_web_url() {
+	local url
+	url=$(git remote get-url origin)
+	url="${url%.git}"
+	if [[ "$url" =~ ^git@([^:]+):(.+)$ ]]; then
+		url="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+	elif [[ "$url" =~ ^ssh://(git@)?([^/:]+)(:[0-9]+)?/(.+)$ ]]; then
+		url="https://${BASH_REMATCH[2]}/${BASH_REMATCH[4]}"
+	fi
+	printf '%s' "$url"
+}
+
+# --- Parse arguments ---
+
+BUMP=""
+EXPLICIT_TAG=""
+case "${1:-}" in
+--major | --minor | --patch) BUMP="${1#--}" ;;
+v[0-9]*)
+	# Must match cliff.toml's tag_pattern, or the tag would be invisible
+	# to the changelog.
+	[[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
+	EXPLICIT_TAG="$1"
+	;;
+*) usage ;;
+esac
+
+# --- Preconditions ---
+
+for tool in git git-cliff gh shellcheck; do
+	command -v "$tool" >/dev/null || {
+		echo "error: '$tool' not found on PATH" >&2
+		exit 1
+	}
+done
+
+# Refuse to release from a dirty tree — the release commit must contain
+# only the changelog and the plugin version stamp. Untracked files are
+# ignored.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+	echo "error: working tree has uncommitted changes; commit or stash them first." >&2
+	git status --short
+	exit 1
+fi
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$BRANCH" != "main" ]]; then
+	echo "warning: releasing from branch '$BRANCH', not 'main'" >&2
+fi
+
+WEB_URL=$(remote_web_url) # resolved before any mutation so a bad remote fails early
+
+# --- Compute the new tag from the latest release tag ---
+
+# Empty when no release tag exists yet: a real v0.0.0 is a valid tag, so
+# it cannot double as the "no tags" sentinel.
+CURRENT=$(git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || echo "")
+if [[ -n "$EXPLICIT_TAG" ]]; then
+	TAG="$EXPLICIT_TAG"
+else
+	IFS=. read -r MAJOR MINOR PATCH <<<"${CURRENT#v}"
+	: "${MAJOR:=0}" "${MINOR:=0}" "${PATCH:=0}"
+	case "$BUMP" in
+	major) TAG="v$((MAJOR + 1)).0.0" ;;
+	minor) TAG="v${MAJOR}.$((MINOR + 1)).0" ;;
+	patch) TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+	esac
+fi
+
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+	echo "error: tag $TAG already exists" >&2
+	exit 1
+fi
+
+if [[ -n "$CURRENT" ]] && [[ "$(git rev-list "$CURRENT"..HEAD --count)" -eq 0 ]]; then
+	echo "error: no commits since $CURRENT; nothing to release." >&2
+	exit 1
+fi
+
+echo "Releasing ${CURRENT:-(no previous tag)} -> ${TAG} on branch ${BRANCH}"
+
+# --- Gate: the local twin of what CI verifies on the tag workflow ---
+# (make test self-skips without a docker daemon; the tag workflow runs it
+# on a runner that has one.)
+
+make lint
+make test
+
+# --- Regenerate changelog ---
+#
+# Full regeneration (not --prepend) keeps the file deterministic: past
+# versions are sectioned from their tags, and --tag treats the
+# not-yet-created tag's commits as belonging to this release.
+echo "Updating CHANGELOG.md..."
+git-cliff --tag "$TAG" -o CHANGELOG.md
+
+# --- Stamp the plugin dispatcher's version ---
+#
+# docker-cli-plugin-metadata reports this, so `docker extras` and the
+# release must agree on the version.
+echo "Stamping plugin VERSION=${TAG#v}..."
+sed -i -E "s/^VERSION=\"[^\"]*\"/VERSION=\"${TAG#v}\"/" plugin/docker-extras
+grep -q "^VERSION=\"${TAG#v}\"$" plugin/docker-extras || {
+	echo "error: could not stamp VERSION in plugin/docker-extras" >&2
+	exit 1
+}
+
+# --- Commit, tag, push ---
+#
+# The commit title is load-bearing twice: the commit-msg hook requires a
+# conventional-commit type, and cliff.toml skips chore(release) commits so
+# the release commit never lists itself.
+git add CHANGELOG.md plugin/docker-extras
+git commit -m "chore(release): ${TAG}"
+git tag -a "$TAG" -m "$TAG"
+
+echo "Pushing ${BRANCH} and ${TAG}..."
+git push --follow-tags
+
+cat <<EOF
+
+Pushed ${TAG}. CI will re-verify, build the release assets, and create
+the GitHub Release.
+
+Watch the workflow:
+  gh run watch
+Once released:
+  ${WEB_URL}/releases
+  curl -fsSL ${WEB_URL}/releases/latest/download/docker-extras-install.sh | sh
+EOF
