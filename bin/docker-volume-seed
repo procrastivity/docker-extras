@@ -1,0 +1,774 @@
+#!/bin/bash
+# docker-volume-seed — archive a Docker named volume to a seed file, and
+# restore a seed file into another named volume.
+#
+# Usage:
+#   docker-volume-seed capture --from-volume VOL [--name NAME] [--data-dir DIR]
+#   docker-volume-seed restore --to-volume VOL [--name NAME] [--data-dir DIR]
+#                              [--label KEY=VALUE]... [--yes] [--force]
+#
+# This tool knows only Docker. It does not know compose files, app layouts, or
+# xcind — the compose project that uses a volume is discovered from the labels
+# Docker Compose stamps on volumes and containers, and taken down with
+# `docker compose -p PROJECT down` (named volumes survive a plain `down`).
+# A running container without a compose label is stopped directly with
+# `docker stop` — kept, not removed, so `docker start NAME` brings it back.
+# The tool never starts anything back up; restart your stack yourself.
+# Both directions name what they will stop, and ask before they stop it.
+#
+# The seed is a plain tar of the volume contents (NAME.tar) plus a small .meta
+# sidecar (source volume, container image, compose project, date, byte count,
+# sha256). The image is recorded because a physical database data dir only
+# starts cleanly under the image it was written by; restore refuses a
+# mismatched or unknown image unless --force. Restore infers the target's
+# image from containers attached to the volume; --expect-image supplies it
+# explicitly when nothing is attached (for example a fresh volume created via
+# --allow-create), and capture's --image does the same for the seed side.
+#
+# The byte count and the sha256 exist because restore is not reversible: it
+# clears the target before tar reads a byte, so a truncated or rotted seed
+# would empty a live volume and report success. Both are checked BEFORE
+# anything is stopped and before the clear, so a bad seed leaves the target
+# exactly as it was. A plain tar carries no checksum of its own — the older
+# compressed format got that for free from zstd. A seed with neither field —
+# captured before this tool recorded them, or converted from that old
+# compressed format — falls back to a tar -tf header check instead of being
+# refused outright: db_seed_check (db-seed.sh) grades that exact shape
+# usable, and this gate has to agree with it.
+#
+# --label KEY=VALUE stamps labels on the volume, repeatable. The tool invents no
+# key: the caller decides which labels matter. A compose caller, for example,
+# stamps com.docker.compose.project so compose stops warning that the volume
+# "was not created by Docker Compose" on the next up. Docker cannot label an
+# existing volume, so a target whose labels differ is removed and recreated with
+# them — sound only here, because restore replaces the contents anyway and the
+# volume's users are already gone. The recreated volume carries exactly the
+# labels requested and nothing else: a stale label kept from the old object
+# (compose's config-hash, say) is what makes a tool offer to delete the volume
+# later. A volume that cannot be removed (a container is still attached) or must
+# not be (a non-default driver, or driver options that decide where the bytes
+# live) keeps its labels and is cleared in place.
+#
+# Both directions run tar INSIDE one throwaway container with the seed dir
+# bind-mounted, so the bytes move at disk speed: a 32 GB volume measured ~20 s
+# each way, where piping the tar through docker's attach stdout managed only
+# ~90 MB/s (~6 min). The seed is deliberately uncompressed — host-side
+# zstd -T0 made it ~7x smaller but both directions ~2x slower and dragged in a
+# host pipeline; compress a seed yourself if you need to ship or keep many.
+
+set -euo pipefail
+
+say() { printf 'docker-volume-seed: %s\n' "$*" >&2; }
+
+# Exit codes. A caller has to be able to tell the operator the truth about the
+# target volume, so the failure codes split on whether the destructive clear
+# started:
+#   0  success
+#   1  failed BEFORE the target changed — it holds its previous contents
+#   2  the target no longer holds its previous contents — it is empty, holds a
+#      partial extract, or (in the relabel path) was removed and not recreated
+#   3  declined at the prompt — nothing was changed
+# Code 2 comes only from a step that has already destroyed the target: the
+# destructive docker run, and the volume rm that relabeling needs. Every other
+# failure exits 1 and truthfully reports intact data. Keep that asymmetry: a
+# die added later reports "intact", which is what it will be — so a new step
+# that destroys the target must use die_after_clear, not die.
+# Any other code (127 — not found) means the tool never ran; read it as 1.
+die() { printf 'docker-volume-seed: error: %s\n' "$*" >&2; exit 1; }
+die_after_clear() { printf 'docker-volume-seed: error: %s\n' "$*" >&2; exit 2; }
+
+confirm() {
+  local reply
+  printf 'docker-volume-seed: %s [y/N] ' "$1" >&2
+  read -r reply </dev/tty 2>/dev/null || { printf '\n' >&2; return 1; }
+  case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
+}
+
+# One tab-separated record per container the tool stopped, appended the moment
+# the stop succeeds so a later failure still leaves an accurate list behind.
+# A caller cannot infer this: stop_users_of takes nothing down when no
+# container currently runs on the volume, and `docker compose down` destroys
+# the evidence of what was running.
+record_action() {
+  [ -n "$report_file" ] || return 0
+  local IFS=$'\t'
+  printf '%s\n' "$*" >>"$report_file" || die "could not write the report file: $report_file"
+}
+
+# The one EXIT handler. It does both jobs — remove capture's temp files and
+# name whatever was stopped — because two traps cannot coexist and the second
+# would silently replace the first.
+on_exit() {
+  # Only capture writes temp files; use an if, not &&, so a false test cannot
+  # become the trap's exit status.
+  if [ "$cmd" = capture ]; then
+    rm -f "$archive_tmp" "$meta_tmp"
+  fi
+  report_stopped
+  # End on a command that cannot fail: under set -e a failing command in an
+  # EXIT trap replaces the script's exit status with its own.
+  :
+}
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  docker-volume-seed capture --from-volume VOL [--name NAME] [--data-dir DIR]
+                             [--image IMG] [--yes] [--report FILE]
+  docker-volume-seed restore --to-volume VOL [--name NAME] [--data-dir DIR]
+                             [--allow-create] [--label KEY=VALUE]...
+                             [--expect-image IMG] [--yes] [--force]
+                             [--no-verify] [--report FILE]
+  docker-volume-seed --help
+
+Archive a Docker named volume to a seed file, or restore that seed into
+another named volume. Running containers that use the volume are stopped
+first: a compose project is taken down whole (docker compose -p PROJECT down
+— named volumes are kept), and a container without a compose label is
+stopped with docker stop (kept, not removed). Both directions name what they
+will stop before they stop it, and ask first. Nothing is started back up
+afterward.
+
+capture
+  --from-volume VOL  existing volume to archive (required)
+  --image IMG        record IMG as the seed's image lock instead of inferring
+                     it from containers attached to the volume — use it when
+                     the project is down, because there is then nothing to
+                     infer from and an unlocked seed needs --force to restore
+
+restore (DESTRUCTIVE — replaces the target volume's contents)
+  --to-volume VOL    volume to restore into (required; must exist unless
+                     --allow-create)
+  --allow-create     create the target volume when it does not exist
+  --expect-image IMG the image the restored data must start under; overrides
+                     the image inferred from containers attached to the volume
+                     (use when nothing is attached yet)
+  --label KEY=VALUE  label to stamp on the target volume; repeatable. When the
+                     volume exists with different labels it is removed and
+                     recreated with them (its contents are replaced either
+                     way), keeping ONLY the labels given here. Left alone when
+                     the volume cannot be removed (a container is still
+                     attached) or must not be (non-default driver or driver
+                     options).
+  --force            restore even when the image lock is not satisfied — a
+                     mismatch, or an unknown image on either side. It is the
+                     only override of the image lock, and it overrides nothing
+                     else
+  --no-verify        do not run the integrity gate at all (byte count and
+                     sha256). Nothing lets a restore continue past a check
+                     that ran and failed
+
+common
+  --name NAME        seed base name: NAME.tar + NAME.meta (default: db-seed)
+  --data-dir DIR     seed directory
+                     (default: ${XDG_DATA_HOME:-~/.local/share}/docker-volume-seed)
+  --yes, -y          do not ask for confirmation (required when no tty)
+  --report FILE      record what was stopped, one tab-separated line each:
+                       down<TAB>PROJECT<TAB>service,service
+                       stop<TAB>CONTAINER
+                     FILE is truncated at startup, so an absent or empty FILE
+                     means nothing was stopped
+  -h, --help         show this help
+
+exit codes
+  0  success
+  1  failed BEFORE the target volume changed — it holds its previous contents
+  2  the target no longer holds its previous contents — it is empty, holds a
+     partial extract, or was removed and not recreated
+  3  declined at the prompt — nothing was changed
+  capture returns 0, 1 or 3 only; it never returns 2.
+
+The seed is a plain uncompressed tar, sized like the volume itself. The
+sidecar records its byte count and sha256; restore checks both before it
+stops anything and before it clears the target, so a damaged seed leaves the
+target untouched. A seed with neither field falls back to a tar -tf header
+check in the same place instead of being refused outright.
+
+Example — copy one database volume into another:
+  docker-volume-seed capture --from-volume xesapps-demo_database_data --name xesapps --image mysql:8.0
+  docker-volume-seed restore --to-volume dev-xesapps_database_data --name xesapps
+
+Example — seed a volume so the stack that owns it adopts it silently:
+  docker-volume-seed restore --to-volume dev-xesapps_database_data --name xesapps \
+    --allow-create --yes \
+    --label com.docker.compose.project=dev-xesapps \
+    --label com.docker.compose.volume=database_data
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Args
+
+cmd="${1:-}"
+case "$cmd" in
+  capture|restore) shift ;;
+  --help|-h) usage; exit 0 ;;
+  "") usage; exit 1 ;;
+  *) die "unknown command: $cmd (expected 'capture' or 'restore')" ;;
+esac
+
+vol=""
+name="db-seed"
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/docker-volume-seed"
+assume_yes=""
+force=""
+no_verify=""
+allow_create=""
+expect_image=""
+capture_image=""
+report_file=""
+# Declared unconditionally so ${#labels[@]} is safe on the capture path too.
+labels=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --from-volume)
+      [ "$cmd" = capture ] || die "--from-volume is a 'capture' option"
+      vol="${2:-}"; [ -n "$vol" ] || die "--from-volume requires a value"; shift 2 ;;
+    --to-volume)
+      [ "$cmd" = restore ] || die "--to-volume is a 'restore' option"
+      vol="${2:-}"; [ -n "$vol" ] || die "--to-volume requires a value"; shift 2 ;;
+    --name)
+      name="${2:-}"; [ -n "$name" ] || die "--name requires a value"; shift 2 ;;
+    --data-dir)
+      data_dir="${2:-}"; [ -n "$data_dir" ] || die "--data-dir requires a value"; shift 2 ;;
+    --report)
+      report_file="${2:-}"; [ -n "$report_file" ] || die "--report requires a value"; shift 2 ;;
+    --image)
+      [ "$cmd" = capture ] || die "--image is a 'capture' option"
+      capture_image="${2:-}"; [ -n "$capture_image" ] || die "--image requires a value"; shift 2 ;;
+    --allow-create)
+      [ "$cmd" = restore ] || die "--allow-create is a 'restore' option"
+      allow_create=1; shift ;;
+    --expect-image)
+      [ "$cmd" = restore ] || die "--expect-image is a 'restore' option"
+      expect_image="${2:-}"; [ -n "$expect_image" ] || die "--expect-image requires a value"; shift 2 ;;
+    --label)
+      [ "$cmd" = restore ] || die "--label is a 'restore' option"
+      # KEY=VALUE with a non-empty KEY. docker accepts a bare KEY (empty value),
+      # but a label meant for comparison must have both halves.
+      case "${2:-}" in
+        "")  die "--label requires a value" ;;
+        =*)  die "--label needs a KEY before '=' (got: $2)" ;;
+        *=*) labels+=("$2") ;;
+        *)   die "--label must be KEY=VALUE (got: $2)" ;;
+      esac
+      shift 2 ;;
+    --no-verify)
+      [ "$cmd" = restore ] || die "--no-verify is a 'restore' option"
+      no_verify=1; shift ;;
+    --yes|-y)
+      assume_yes=1; shift ;;
+    --force)
+      [ "$cmd" = restore ] || die "--force is a 'restore' option"
+      force=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+if [ -z "$vol" ]; then
+  [ "$cmd" = capture ] && die "capture requires --from-volume"
+  die "restore requires --to-volume"
+fi
+[[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+  || die "--name must be a plain file base name (got: $name)"
+
+# Truncate the report here, before anything can be stopped: an unwritable
+# path must fail while the machine is untouched, and a stale file from an
+# earlier run must never be read as this run's work.
+if [ -n "$report_file" ]; then
+  : 2>/dev/null > "$report_file" || die "cannot write the report file: $report_file"
+fi
+
+command -v docker >/dev/null 2>&1 || die "docker not found on PATH"
+# Ask the daemon, not just the client. Every docker query below hides its
+# stderr, so without this an unreachable daemon surfaces as whatever the first
+# query means when it fails — "volume not found", which sends the user after
+# the wrong problem.
+docker version --format '{{.Server.Version}}' >/dev/null 2>&1 \
+  || die "cannot reach the docker daemon (is it running? check DOCKER_HOST)"
+
+# docker bind mounts need an absolute path
+case "$data_dir" in /*) ;; *) data_dir="$PWD/$data_dir" ;; esac
+
+archive="$data_dir/$name.tar"
+meta="$data_dir/$name.meta"
+archive_tmp="$archive.tmp"
+meta_tmp="$meta.tmp"
+
+# ---------------------------------------------------------------------------
+# Docker helpers
+
+vol_exists() { docker volume inspect "$1" >/dev/null 2>&1; }
+
+# The volume's labels as KEY=VALUE lines (nothing when it carries none).
+vol_labels() {
+  docker volume inspect \
+    -f '{{range $k, $v := .Labels}}{{$k}}={{$v}}{{println}}{{end}}' "$1" 2>/dev/null
+}
+
+# Does the volume already carry every --label asked for? Only the requested keys
+# are compared — labels it carries beyond them are its own business, which is
+# what keeps a volume its owner labeled correctly from being recreated, and so
+# keeps compose's config-hash on such a volume intact. -qxF matches whole lines
+# literally, so a value holding '.' or '*' compares as written.
+labels_match() {
+  local v="$1" have l
+  [ "${#labels[@]}" -gt 0 ] || return 0
+  have="$(vol_labels "$v")" || have=""
+  for l in "${labels[@]}"; do
+    printf '%s\n' "$have" | grep -qxF -- "$l" || return 1
+  done
+  return 0
+}
+
+# A volume this tool may delete and recreate: the default local driver with no
+# driver options. Recreating anything else (a bind, NFS or plugin volume) would
+# silently drop the options that decide WHERE the bytes live.
+vol_is_plain() {
+  local d o
+  d="$(docker volume inspect -f '{{.Driver}}' "$1" 2>/dev/null)" || return 1
+  [ "$d" = local ] || return 1
+  o="$(docker volume inspect \
+         -f '{{range $k, $v := .Options}}{{$k}}{{println}}{{end}}' "$1" 2>/dev/null)" || o=""
+  [ -z "$o" ]
+}
+
+# docker volume create carrying the requested labels. Branch on the count rather
+# than expanding an empty array, so this also runs on a bash without the 4.4 fix
+# for "${arr[@]}" under set -u.
+vol_create() {
+  local v="$1" args=() l
+  if [ "${#labels[@]}" -gt 0 ]; then
+    for l in "${labels[@]}"; do args+=(--label "$l"); done
+    docker volume create "${args[@]}" "$v" >/dev/null
+  else
+    docker volume create "$v" >/dev/null
+  fi
+}
+
+# One value from a .meta sidecar: the first line whose key matches, or the
+# empty string. First, not last, because capture-db-seed appends its own keys
+# to a published sidecar and a repeated key must resolve to the tool's own.
+meta_value() {
+  sed -n "s/^$1=//p" "$2" 2>/dev/null | head -n1
+}
+
+# Distinct image(s) of every container (running or stopped) attached to the
+# volume, one per line. Empty when nothing is attached.
+vol_images() {
+  docker ps -a --filter volume="$1" --format '{{.Image}}' | sed '/^$/d' | sort -u
+}
+
+# The compose project that owns the volume: the label compose stamps on the
+# volume itself, else the label on any attached container.
+vol_project() {
+  local p
+  p="$(docker volume inspect -f '{{index .Labels "com.docker.compose.project"}}' "$1" 2>/dev/null)" || p=""
+  if [ -z "$p" ]; then
+    p="$(docker ps -a --filter volume="$1" \
+           --format '{{.Label "com.docker.compose.project"}}' \
+         | sed '/^$/d' | sort -u | head -n1)" || p=""
+  fi
+  printf '%s\n' "$p"
+}
+
+# What RUNNING containers use the volume, surveyed before anything stops.
+# pending_projects holds one "PROJECT<TAB>service,service" line per compose
+# project; pending_containers holds one name per container with no compose
+# label. Filled by survey_users_of, announced by announce_pending, acted on by
+# stop_users_of — three steps, because `docker compose down` removes the
+# containers and the service list cannot be read back afterward.
+pending_projects=""
+pending_containers=""
+# What was actually taken down or stopped, appended as each one succeeds.
+downed_projects=""
+stopped_containers=""
+
+survey_users_of() {
+  local v="$1" running projects p svcs
+  pending_projects=""
+  pending_containers=""
+  running="$(docker ps --filter volume="$v" \
+               --format '{{.Names}}{{"\t"}}{{.Label "com.docker.compose.project"}}')"
+  [ -n "$running" ] || return 0
+
+  projects="$(awk -F'\t' '$2!=""{print $2}' <<<"$running" | sort -u)"
+  if [ -n "$projects" ]; then
+    pending_projects="$(
+      while IFS= read -r p; do
+        # oneoff=False drops `docker compose run` containers: a one-off is not
+        # a service of the project, so restarting it by name would create a
+        # service that was never up.
+        svcs="$(docker ps --filter label=com.docker.compose.project="$p" \
+                          --filter label=com.docker.compose.oneoff=False \
+                          --format '{{.Label "com.docker.compose.service"}}' \
+                | sed '/^$/d' | sort -u | paste -sd, -)" || svcs=""
+        printf '%s\t%s\n' "$p" "$svcs"
+      done <<<"$projects"
+    )"
+  fi
+
+  pending_containers="$(awk -F'\t' '$2==""{print $1}' <<<"$running")"
+}
+
+# Name everything that is about to stop, before it stops. The operator has to
+# answer the prompt on facts: a volume can belong to a project of fifteen
+# services, and the tool starts none of them back up.
+announce_pending() {
+  local v="$1" p svcs c
+  if [ -n "$pending_projects" ]; then
+    while IFS=$'\t' read -r p svcs; do
+      say "volume $v is in use — compose project '$p' will be taken down${svcs:+ (services: $svcs)}"
+    done <<<"$pending_projects"
+  fi
+  if [ -n "$pending_containers" ]; then
+    while IFS= read -r c; do
+      say "volume $v is in use — container '$c' will be stopped"
+    done <<<"$pending_containers"
+  fi
+}
+
+# Quiesce the surveyed containers: a compose-managed container's whole project
+# is taken down (docker compose -p matches by label from anywhere; named
+# volumes stay), and a container without a compose project label is stopped
+# directly with docker stop — kept, not removed.
+# Each success is recorded INSIDE the loop. A die on the second project must
+# still leave the first one named, both in the closing messages and in the
+# report file.
+stop_users_of() {
+  local v="$1" p svcs c
+  if [ -n "$pending_projects" ]; then
+    while IFS=$'\t' read -r p svcs; do
+      say "volume $v is in use — taking down compose project '$p'…"
+      # Run from / with COMPOSE_FILE unset: compose falls back to label-based
+      # project reconstruction only when no compose file is discoverable, so a
+      # compose file in the caller's CWD (or $COMPOSE_FILE) would otherwise
+      # substitute its own — possibly partial — service model for project $p.
+      (cd / && env -u COMPOSE_FILE -u COMPOSE_PATH_SEPARATOR \
+         docker compose -p "$p" down) \
+        || die "could not take down compose project '$p'"
+      downed_projects+="${downed_projects:+$'\n'}$p"
+      record_action down "$p" "$svcs"
+    done <<<"$pending_projects"
+  fi
+
+  if [ -n "$pending_containers" ]; then
+    while IFS= read -r c; do
+      say "volume $v is in use — stopping container '$c'…"
+      # -t 120: the 10 s default SIGKILLs a database that is still flushing,
+      # and a killed DB leaves a dirty data dir in the volume. An explicit
+      # stop also wins over restart policies — Docker does not resurrect a
+      # manually stopped container.
+      docker stop -t 120 "$c" >/dev/null || die "could not stop container '$c'"
+      stopped_containers+="${stopped_containers:+$'\n'}$c"
+      record_action stop "$c"
+    done <<<"$pending_containers"
+  fi
+}
+
+# Closing lines for capture/restore: name what was taken down or stopped so
+# the user knows how to bring it back (the tool never restarts anything).
+report_stopped() {
+  local p c
+  if [ -n "$downed_projects" ]; then
+    while IFS= read -r p; do
+      say "compose project '$p' was taken down; restart it yourself when needed"
+    done <<<"$downed_projects"
+  fi
+  if [ -n "$stopped_containers" ]; then
+    while IFS= read -r c; do
+      say "container '$c' was stopped; 'docker start $c' brings it back"
+    done <<<"$stopped_containers"
+  fi
+}
+
+# Armed here, once, at top level — after report_stopped exists to be called
+# and before the first action. A per-function trap would either lose the
+# stopped-container report or leak capture's temp file, whichever was armed
+# second.
+trap on_exit EXIT
+
+# ---------------------------------------------------------------------------
+# capture
+
+do_capture() {
+  vol_exists "$vol" || die "volume not found: $vol"
+
+  # Record provenance while the containers still exist — `down` removes them.
+  # --image wins over inference: a capture taken while the project is down has
+  # no container to read an image from, and a seed with no image lock cannot
+  # be restored without --force.
+  local image project
+  image="$capture_image"
+  if [ -z "$image" ]; then
+    image="$(vol_images "$vol")"
+    case "$image" in
+      *$'\n'*)
+        say "note: containers with different images use $vol; not recording an image lock"
+        image="" ;;
+      "")
+        say "note: no container is attached to $vol; there is no image to infer" ;;
+    esac
+  fi
+  [ -n "$image" ] \
+    || say "note: no image lock recorded — restoring this seed needs --force (or re-capture with --image IMG)"
+  project="$(vol_project "$vol")"
+
+  survey_users_of "$vol"
+  if [ -n "$pending_projects" ] || [ -n "$pending_containers" ]; then
+    announce_pending "$vol"
+    if [ -z "$assume_yes" ]; then
+      confirm "capture stops all of the above and starts nothing back up — continue?" \
+        || { say "aborted (no changes made)"; exit 3; }
+    fi
+  fi
+  stop_users_of "$vol"
+
+  mkdir -p "$data_dir"
+
+  say "archiving volume $vol → $archive"
+  # tar runs inside one container and writes straight to the bind-mounted seed
+  # dir (see the header note on why there is no pipe to the host). It must run
+  # as root to read the volume's files, so it hands the output file back to
+  # the invoking user before exiting. The digest is taken in the same
+  # container, off the file just written, and returned on stdout — a host-side
+  # pass would read the whole archive a second time.
+  local t0=$SECONDS elapsed sha bytes
+  if ! sha="$(docker run --rm -v "$vol":/source:ro -v "$data_dir":/seed alpine \
+         sh -c "tar -C /source -cf '/seed/$name.tar.tmp' . \
+                && chown $(id -u):$(id -g) '/seed/$name.tar.tmp' \
+                && sha256sum '/seed/$name.tar.tmp' | cut -d' ' -f1")"; then
+    die "volume archive (tar) failed"
+  fi
+  [[ "$sha" =~ ^[0-9a-f]{64}$ ]] \
+    || die "could not compute the seed checksum (got: $sha)"
+  bytes="$(stat -c %s "$archive_tmp")" || die "could not read the size of $archive_tmp"
+  elapsed=$((SECONDS - t0))
+
+  printf '%s\n' \
+    "source_volume=$vol" \
+    "image=$image" \
+    "project=$project" \
+    "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "bytes=$bytes" \
+    "sha256=$sha" > "$meta_tmp" \
+    || die "could not write seed metadata"
+  # Each mv is atomic, the pair is not: a crash between the two leaves a new
+  # archive beside the previous sidecar. That pair is detectable rather than
+  # silent, because restore recomputes bytes= and sha256= against the archive
+  # it is about to extract and refuses a mismatch.
+  mv "$archive_tmp" "$archive" || die "could not move archive into place"
+  mv "$meta_tmp" "$meta"       || die "could not move metadata into place"
+
+  say "done → $archive (${elapsed}s)"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# restore
+
+do_restore() {
+  if [ ! -f "$archive" ]; then
+    [ -f "$archive.zst" ] && die "seed not found: $archive
+       ($archive.zst exists — it is the older compressed seed format; convert
+       it first: zstd -d --rm '$archive.zst' && mv '$archive.meta' '$meta')"
+    die "seed not found: $archive
+       create one first: docker-volume-seed capture --from-volume SOURCE_VOL --name $name"
+  fi
+  # relabel is set when the target exists but does not already carry the
+  # requested labels. Docker has no "set labels on an existing volume", so the
+  # object must be recreated — which happens after stop_users_of, below, once
+  # the volume's users are gone, never here.
+  local relabel=""
+
+  # Every gate that can say no runs before the prompt, cheapest first: an
+  # operator must not confirm a destructive restore and only then be told the
+  # seed was unusable all along.
+  local want="" bytes="" sha="" legacy=""
+  if [ -f "$meta" ]; then
+    # A sidecar converted from the older compressed seed format carries the
+    # image under mysql_image=, so fall back to that key.
+    want="$(meta_value image "$meta")" || want=""
+    [ -n "$want" ] || { want="$(meta_value mysql_image "$meta")" || want=""; }
+    bytes="$(meta_value bytes "$meta")" || bytes=""
+    sha="$(meta_value sha256 "$meta")" || sha=""
+    # A malformed value is no value. Treat it as absent rather than compare
+    # against it, so the refusal below names the real problem.
+    [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=""
+    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || sha=""
+    # A seed captured before this tool recorded either field — or one
+    # converted from the old .tar.zst format, whose sidecar carries neither —
+    # has both empty. db_seed_check (db-seed.sh) already grades that exact
+    # shape "usable" by falling back to tar -tf; this gate has to agree with
+    # its own caller's pre-check instead of refusing what it was just told
+    # was fine. A sidecar with only one field missing is not that shape — a
+    # real capture always writes both together — so it still falls through
+    # to the exact checks below and their refusal.
+    [ -n "$bytes" ] || [ -n "$sha" ] || legacy=1
+  elif [ -z "$no_verify" ]; then
+    die "no seed metadata: $meta
+       without it the seed cannot be verified and the image cannot be locked
+       (--no-verify skips the check; --force is then needed for the image too)"
+  fi
+
+  if [ -n "$legacy" ] && [ -z "$no_verify" ]; then
+    # Neither integrity field exists to compare against, so the most this
+    # seed can prove is what tar -tf proves: the headers are intact. That is
+    # weaker than the byte-count/sha256 checks below — it misses a truncation
+    # that lands on a 512-byte block boundary — but refusing every seed made
+    # before these fields existed would make each one permanently
+    # unrestorable, with no seed this tool ever wrote able to earn its way
+    # off that list.
+    say "note: $meta predates the integrity fields — checking the tar header only"
+    docker run --rm -v "$data_dir":/seed:ro alpine tar -tf "/seed/$name.tar" >/dev/null 2>&1 \
+      || die "seed is corrupt: $archive (tar -tf failed)
+       re-capture it, or pass --no-verify to restore it unchecked"
+  elif [ -z "$no_verify" ]; then
+    # Size first — comparing two numbers costs nothing and catches every
+    # truncation exactly, including the block-aligned ones tar -tf reads as a
+    # valid short archive.
+    local actual
+    [ -n "$bytes" ] \
+      || die "the seed records no byte count: $meta
+       it predates the integrity fields — re-capture it, or pass --no-verify"
+    actual="$(stat -c %s "$archive")" || die "could not read the size of $archive"
+    [ "$bytes" = "$actual" ] \
+      || die "seed is truncated or damaged: $archive holds $actual bytes, the sidecar records $bytes
+       re-capture it, or pass --no-verify to restore it unchecked"
+  fi
+
+  if ! vol_exists "$vol"; then
+    [ -n "$allow_create" ] \
+      || die "volume not found: $vol (pass --allow-create, or create it with 'docker volume create $vol')"
+    say "creating volume $vol (--allow-create)…"
+    vol_create "$vol" || die "could not create volume $vol"
+  elif ! labels_match "$vol"; then
+    relabel=1
+  fi
+
+  # Image guard — read the target side while its containers still exist.
+  # --expect-image is the caller's authoritative target image; without it, the
+  # target image is inferred from containers attached to the volume.
+  # An unknown image on either side is the case this guard exists for, not a
+  # reason to skip it: mysqld started on a data dir written by a different
+  # server version corrupts it quietly. --force is the only way past, and the
+  # image lock is the only thing --force covers.
+  local have
+  have="$expect_image"
+  if [ -z "$have" ]; then
+    have="$(vol_images "$vol")"
+    case "$have" in *$'\n'*) have="" ;; esac
+  fi
+  if [ -z "$want" ] || [ -z "$have" ] || [ "$want" != "$have" ]; then
+    if [ -n "$force" ]; then
+      say "warning: image lock not satisfied (seed '${want:-unknown}', target '${have:-unknown}') — continuing per --force"
+    elif [ -z "$want" ]; then
+      die "the seed records no image, so the image lock cannot be checked: $meta
+       re-capture it with --image IMG, or restore anyway with --force"
+    elif [ -z "$have" ]; then
+      die "cannot determine which image the target $vol runs, so the image lock cannot be checked
+       pass --expect-image IMG, or restore anyway with --force"
+    else
+      die "seed was captured under image '$want' but the target of $vol runs '$have'
+       a physical data dir only starts cleanly under the same image (--force to override)"
+    fi
+  fi
+
+  # The payload check, last of the gates because it is the only expensive one.
+  # It runs in its own container that mounts the seed dir read-only and never
+  # mounts $vol, so nothing here can touch the target. Skipped for a legacy
+  # seed — the tar -tf fallback above already ran in its place, because there
+  # is no sha256= left to compare a fresh digest against.
+  if [ -z "$no_verify" ] && [ -z "$legacy" ]; then
+    local got
+    [ -n "$sha" ] \
+      || die "the seed records no sha256: $meta
+       it predates the integrity fields — re-capture it, or pass --no-verify"
+    say "verifying seed checksum (reads $archive once)…"
+    got="$(docker run --rm -v "$data_dir":/seed:ro alpine \
+             sha256sum "/seed/$name.tar" | cut -d' ' -f1)" \
+      || die "could not compute the checksum of $archive"
+    [ "$got" = "$sha" ] \
+      || die "seed checksum does not match: $archive
+       sidecar records $sha, the file computes $got — the seed is damaged
+       re-capture it, or pass --no-verify to restore it unchecked"
+  fi
+
+  survey_users_of "$vol"
+  announce_pending "$vol"
+  if [ -z "$assume_yes" ]; then
+    # relabel is known before the prompt (only the removability test needs the
+    # containers gone), so name every destructive step before they answer.
+    local prompt="this REPLACES all contents of volume '$vol' with $archive"
+    [ -z "$relabel" ] \
+      || prompt="$prompt, and RECREATES the volume object to set the labels given"
+    # Declined is exit 3, never die's 1: 1 promises the target is intact, which
+    # is also true here, but the caller has to tell "refused" from "failed".
+    confirm "$prompt — continue?" \
+      || { say "aborted (no changes made)"; exit 3; }
+  fi
+
+  stop_users_of "$vol"
+
+  # Relabel by recreating the object. Two refusals, both non-fatal — the
+  # contents are replaced either way, so a volume that keeps its labels is a
+  # note, not a failure:
+  #   * a container still references the volume — compose `down` removes its
+  #     containers, but a plain container is only STOPPED and stays attached,
+  #     and docker volume rm refuses while any container references it;
+  #   * the volume is not a plain local volume, so recreating it would drop the
+  #     driver options that say where its bytes actually live.
+  if [ -n "$relabel" ]; then
+    local attached
+    attached="$(docker ps -a --filter volume="$vol" --format '{{.Names}}' | sed '/^$/d' | head -n1)"
+    if [ -n "$attached" ]; then
+      say "note: labels left alone — container '$attached' is still attached to $vol"
+      say "      (remove it and re-run to stamp them; the contents are replaced regardless)"
+    elif ! vol_is_plain "$vol"; then
+      say "note: labels left alone — $vol has a non-default driver or driver options"
+    else
+      say "recreating volume $vol to set its labels…"
+      docker volume rm "$vol" >/dev/null || die "could not remove volume $vol to relabel it"
+      # A missing named volume is auto-created — UNLABELED — by the -v of the
+      # restore container below, so a failed create has to stop the run.
+      vol_create "$vol" \
+        || die_after_clear "removed $vol but could not recreate it — the volume is gone; re-run to rebuild it from $archive"
+    fi
+  fi
+
+  say "restoring $archive → $vol"
+  # The mirror of capture: one container, seed dir bind-mounted read-only.
+  # It clears the volume first — the three globs cover dotfiles too, and -rf
+  # returns 0 on an unmatched glob, so a no-op clear is not a failure — then
+  # extracts. Each step carries its own exit code, because past this point the
+  # target is no longer intact and the host has to be able to tell "nothing
+  # was cleared" from "cleared, extract unfinished".
+  local t0=$SECONDS elapsed rc=0
+  docker run --rm -v "$vol":/target -v "$data_dir":/seed:ro alpine \
+    sh -c "rm -rf /target/..?* /target/.[!.]* /target/* 2>/dev/null || exit 21; \
+           tar -C /target -xf '/seed/$name.tar' || exit 22" || rc=$?
+  case "$rc" in
+    0) ;;
+    21) die_after_clear "could not clear $vol before the extract" ;;
+    22) die_after_clear "restore (tar extract) into $vol failed" ;;
+    # Docker's own codes for "the container never ran": nothing was cleared.
+    125|126|127) die "the restore container did not start — $vol is unchanged" ;;
+    # A container killed part way through the clear reports 137, not 21, so an
+    # unrecognised code must not be read as harmless.
+    *) die_after_clear "restore container ended unexpectedly (rc=$rc) — $vol may be empty or partial" ;;
+  esac
+  elapsed=$((SECONDS - t0))
+
+  say "done → $vol restored from $archive (${elapsed}s)"
+  say "nothing was started back up; restart the stack that uses $vol yourself"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+
+case "$cmd" in
+  capture) do_capture ;;
+  restore) do_restore ;;
+esac
