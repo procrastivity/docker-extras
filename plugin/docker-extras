@@ -1,0 +1,82 @@
+#!/bin/bash
+# docker-extras — Docker CLI plugin dispatcher for the docker-extras tools.
+#
+# Docker only accepts plugin binaries named docker-[a-z][a-z0-9]* (no hyphens
+# after the prefix), so a multi-word tool like docker-volume-seed cannot be a
+# plugin itself. This one plugin fronts them all:
+#
+#   docker extras                  list the tools and where each resolves
+#   docker extras volume-seed …    exec docker-volume-seed with the args given
+#
+# Install: `make install-plugin` symlinks this file into ~/.docker/cli-plugins,
+# so a checkout's bin/ is preferred and PATH is the fallback. Docker invokes
+# the plugin with the subcommand name repeated as the first argument
+# ("extras"); a leading "extras" is therefore dropped, which also keeps direct
+# invocation (docker-extras volume-seed …) working.
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# The tools this repo ships, without the docker- prefix. Extend when a tool
+# lands in bin/.
+TOOLS=(volume-seed)
+
+# bin/ next to this file's real location — resolves through the
+# ~/.docker/cli-plugins symlink back into the checkout. Empty when this file
+# was copied somewhere without a sibling bin/ (PATH is then the only source).
+self="$(readlink -f "${BASH_SOURCE[0]}")"
+bindir="$(cd "$(dirname "$self")/.." 2>/dev/null && pwd)/bin"
+
+resolve() { # resolve NAME → path on stdout, or return 1
+  local exe="docker-$1"
+  if [ -x "$bindir/$exe" ]; then
+    printf '%s\n' "$bindir/$exe"
+  else
+    command -v "$exe"
+  fi
+}
+
+metadata() {
+  cat <<EOF
+{
+  "SchemaVersion": "0.1.0",
+  "Vendor": "procrastivity",
+  "Version": "$VERSION",
+  "ShortDescription": "Small docker developer-experience utilities",
+  "URL": "https://github.com/procrastivity/docker-extras"
+}
+EOF
+}
+
+list_tools() {
+  local t path
+  echo "docker-extras $VERSION — tools:"
+  for t in "${TOOLS[@]}"; do
+    if path="$(resolve "$t")"; then
+      printf '  %-14s %s\n' "$t" "$path"
+    else
+      printf '  %-14s (not installed — docker-%s not found)\n' "$t" "$t"
+    fi
+  done
+  echo
+  echo "Run one: docker extras TOOL [ARGS…]  (TOOL --help for its usage)"
+}
+
+case "${1:-}" in
+  docker-cli-plugin-metadata) metadata; exit 0 ;;
+  extras) shift ;;
+esac
+
+case "${1:-}" in
+  ""|list) list_tools; exit 0 ;;
+  -h|--help|help) list_tools; exit 0 ;;
+esac
+
+tool="$1"; shift
+if path="$(resolve "$tool")"; then
+  exec "$path" "$@"
+fi
+printf 'docker-extras: unknown tool: %s (docker-%s not found)\n' "$tool" "$tool" >&2
+list_tools >&2
+exit 1
