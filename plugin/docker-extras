@@ -16,7 +16,10 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+# "dev" in a checkout, honestly unstamped: `make dist` rewrites this line
+# in the staged copy from git describe, so only dist/release builds carry
+# a real version. Keep the line's exact shape — the dist sed targets it.
+VERSION="dev"
 
 # The tools this repo ships, without the docker- prefix. Extend when a tool
 # lands in bin/.

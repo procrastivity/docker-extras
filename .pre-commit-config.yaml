@@ -1,0 +1,30 @@
+# .pre-commit-config.yaml — fast per-commit gates.
+# Stock hygiene hooks, shellcheck on every shell file, and a commit-msg
+# hook enforcing Conventional Commits. The docker-backed test suite is
+# deliberately NOT a per-commit hook — run `make check` before pushing.
+#
+# Bootstrap once: `make hooks` (installs both the pre-commit and
+# commit-msg stages). Run on demand: `pre-commit run --all-files`.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        types: [shell]
+
+      - id: conventional-commit-msg
+        name: conventional commit message
+        entry: contrib/check-commit-msg
+        language: system
+        stages: [commit-msg]

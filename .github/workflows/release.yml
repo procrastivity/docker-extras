@@ -13,28 +13,31 @@ jobs:
     steps:
       # Full history + tags: a tag can point at an unverified commit, and
       # the release must re-earn the gate on exactly that commit.
-      - uses: actions/checkout@v4
+      # SHA-pinned (family C6.5): a tag is a mutable pointer into someone
+      # else's repository, and this workflow runs with a release token.
+      # Bump the SHA and the trailing version comment together.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           fetch-tags: true
-      - run: make lint
-      - run: make test
+      # REQUIRE_DOCKER=1: the daemonless test skip is a failure here — the
+      # release gate must actually test.
+      - run: make check
+        env:
+          REQUIRE_DOCKER: "1"
+      # dist stamps the plugin VERSION from git describe (the tag, here)
+      # and copies the installer; checksums owns the whole SHA256SUMS.
       - name: Build release assets
-        run: |
-          make dist checksums
-          cp scripts/install.sh dist/docker-extras-install.sh
-          cd dist && sha256sum docker-extras-install.sh >> SHA256SUMS
-      - name: Extract release notes from the changelog
-        run: |
-          awk '/^## \[/{n++} n==1' CHANGELOG.md > dist/RELEASE_NOTES.md
-          test -s dist/RELEASE_NOTES.md || echo "Release $GITHUB_REF_NAME" > dist/RELEASE_NOTES.md
+        run: make dist checksums
+      # The release body is the annotated tag's message — contrib/release
+      # wrote the git-cliff notes there (--notes-from-tag reads them back).
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --notes-file dist/RELEASE_NOTES.md \
+            --notes-from-tag \
             dist/docker-extras.tar.gz \
             dist/docker-extras-install.sh \
             dist/SHA256SUMS

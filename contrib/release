@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # contrib/release — cut a release. Runs the local twin of the CI gate,
-# regenerates CHANGELOG.md for the new tag, stamps the plugin version,
-# commits, tags, and pushes. The tag workflow (.github/workflows/release.yml)
-# re-runs the gate, builds the assets, and creates the GitHub Release.
+# writes the git-cliff release notes into the annotated tag message, and
+# pushes. The tag workflow (.github/workflows/release.yml) re-runs the
+# gate, builds the assets (stamping the plugin VERSION at dist time), and
+# creates the GitHub Release with the tag message as its body
+# (--notes-from-tag).
+#
+# The notes travel in the tag, not in a committed CHANGELOG.md, on
+# purpose (ste9/toolsmith C6.3: nothing in the repo can disagree with
+# the tag it was built from). The tag sits on an ordinary commit; this
+# script creates no commit of its own.
 set -Eeuo pipefail
 
 DIR=$(cd "$(dirname "${0}")" && pwd)
@@ -12,10 +19,10 @@ cd "$PROJECT_ROOT"
 usage() {
 	echo "Usage: contrib/release --major | --minor | --patch | vX.Y.Z"
 	echo
-	echo "Runs make lint + test, regenerates CHANGELOG.md for the new tag,"
-	echo "stamps the plugin dispatcher's VERSION, commits"
-	echo "'chore(release): vX.Y.Z', tags it, and pushes (CI publishes the"
-	echo "release)."
+	echo "Runs make check, generates the release notes with git-cliff, tags"
+	echo "the current commit with the notes as the annotated tag message,"
+	echo "and pushes the branch and the tag (CI publishes the release from"
+	echo "the tag message)."
 	exit 1
 }
 
@@ -59,9 +66,8 @@ for tool in git git-cliff gh shellcheck; do
 	}
 done
 
-# Refuse to release from a dirty tree — the release commit must contain
-# only the changelog and the plugin version stamp. Untracked files are
-# ignored.
+# Refuse to release from a dirty tree: the tag must name exactly the
+# tree that passed the gate below. Untracked files are ignored.
 if ! git diff --quiet || ! git diff --cached --quiet; then
 	echo "error: working tree has uncommitted changes; commit or stash them first." >&2
 	git status --short
@@ -106,46 +112,37 @@ echo "Releasing ${CURRENT:-(no previous tag)} -> ${TAG} on branch ${BRANCH}"
 
 # --- Gate: the local twin of what CI verifies on the tag workflow ---
 # (make test self-skips without a docker daemon; the tag workflow runs it
-# on a runner that has one.)
+# on a runner that has one, with REQUIRE_DOCKER=1.)
 
-make lint
-make test
+make check
 
-# --- Regenerate changelog ---
-#
-# Full regeneration (not --prepend) keeps the file deterministic: past
-# versions are sectioned from their tags, and --tag treats the
-# not-yet-created tag's commits as belonging to this release.
-echo "Updating CHANGELOG.md..."
-git-cliff --tag "$TAG" -o CHANGELOG.md
+# --- Generate the release notes (they become the tag message) ---
 
-# --- Stamp the plugin dispatcher's version ---
-#
-# docker-cli-plugin-metadata reports this, so `docker extras` and the
-# release must agree on the version.
-echo "Stamping plugin VERSION=${TAG#v}..."
-sed -i -E "s/^VERSION=\"[^\"]*\"/VERSION=\"${TAG#v}\"/" plugin/docker-extras
-grep -q "^VERSION=\"${TAG#v}\"$" plugin/docker-extras || {
-	echo "error: could not stamp VERSION in plugin/docker-extras" >&2
+echo "Generating release notes for ${TAG}..."
+make release-notes TAG="$TAG"
+if ! [[ -s dist/RELEASE_NOTES.md ]]; then
+	echo "error: dist/RELEASE_NOTES.md is empty; git-cliff produced no notes." >&2
 	exit 1
-}
+fi
 
-# --- Commit, tag, push ---
+# --- Tag and push ---
 #
-# The commit title is load-bearing twice: the commit-msg hook requires a
-# conventional-commit type, and cliff.toml skips chore(release) commits so
-# the release commit never lists itself.
-git add CHANGELOG.md plugin/docker-extras
-git commit -m "chore(release): ${TAG}"
-git tag -a "$TAG" -m "$TAG"
+# --cleanup=whitespace is load-bearing: the default (strip) deletes every
+# line that starts with '#', and git-cliff notes start with '## [x.y.z]'.
+git tag -a --cleanup=whitespace -F dist/RELEASE_NOTES.md "$TAG"
 
-echo "Pushing ${BRANCH} and ${TAG}..."
-git push --follow-tags
+# Branch first, then the tag: the branch push runs a normal CI pass for
+# any unpushed commits, and the tag push starts the release workflow on a
+# commit the remote already has.
+echo "Pushing ${BRANCH}, then ${TAG}..."
+git push origin "$BRANCH"
+git push origin "$TAG"
 
 cat <<EOF
 
-Pushed ${TAG}. CI will re-verify, build the release assets, and create
-the GitHub Release.
+Pushed ${TAG}. CI will re-verify, build the release assets (the plugin
+VERSION is stamped at dist time from the tag), and create the GitHub
+Release with the tag message as its body.
 
 Watch the workflow:
   gh run watch
