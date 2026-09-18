@@ -15,6 +15,16 @@ Every tool prints its full usage with `--help`.
 
 ## Install
 
+From the latest release — tools into `~/.local/bin`, plus the `docker extras`
+CLI plugin (set `DOCKER_EXTRAS_NO_PLUGIN=1` to skip it; `DOCKER_EXTRAS_VERSION=vX.Y.Z`
+pins a version, `DOCKER_EXTRAS_INSTALL_DIR` changes the destination):
+
+```sh
+curl -fsSL https://github.com/procrastivity/docker-extras/releases/latest/download/docker-extras-install.sh | sh
+```
+
+From a checkout:
+
 ```sh
 make install                 # copies bin/docker-extras-* into ~/.local/bin
 make install PREFIX=/usr/local
@@ -38,12 +48,25 @@ checkout's `bin/` and falls back to PATH.
 ## Development
 
 ```sh
-make lint                    # shellcheck on bin/, plugin/, tests/
+make hooks                   # commit-msg hook: commits must be Conventional Commits
+make lint                    # shellcheck on bin/, plugin/, contrib/, scripts/, tests/
 make test                    # regression harness (needs a docker daemon; skips without one)
 ```
 
 Want to add a tool? Read [CONTRIBUTING.md](CONTRIBUTING.md) — the admission
 bar is the point of the collection.
+
+## Releasing
+
+```sh
+contrib/release --patch | --minor | --major | vX.Y.Z
+```
+
+The script gates on `make lint` + `make test`, regenerates
+[CHANGELOG.md](CHANGELOG.md) with [git-cliff](https://github.com/orhun/git-cliff),
+stamps the plugin version, commits `chore(release): vX.Y.Z`, tags, and pushes.
+The tag workflow re-runs the gate and publishes the GitHub Release with
+`docker-extras.tar.gz`, `docker-extras-install.sh`, and `SHA256SUMS`.
 
 ## License
 
