@@ -1,0 +1,40 @@
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history + tags: a tag can point at an unverified commit, and
+      # the release must re-earn the gate on exactly that commit.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - run: make lint
+      - run: make test
+      - name: Build release assets
+        run: |
+          make dist checksums
+          cp scripts/install.sh dist/docker-extras-install.sh
+          cd dist && sha256sum docker-extras-install.sh >> SHA256SUMS
+      - name: Extract release notes from the changelog
+        run: |
+          awk '/^## \[/{n++} n==1' CHANGELOG.md > dist/RELEASE_NOTES.md
+          test -s dist/RELEASE_NOTES.md || echo "Release $GITHUB_REF_NAME" > dist/RELEASE_NOTES.md
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file dist/RELEASE_NOTES.md \
+            dist/docker-extras.tar.gz \
+            dist/docker-extras-install.sh \
+            dist/SHA256SUMS
