@@ -1,0 +1,50 @@
+# cliff.toml — git-cliff config for docker-extras's CHANGELOG.md.
+
+[changelog]
+header = "# Changelog\n\nAll notable changes to this project are documented here.\n\n"
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}\
+### {{ group | striptags | trim | upper_first }}
+
+{% for commit in commits %}\
+- {{ commit.message | split(pat="\n") | first | upper_first | trim }}
+{% endfor %}
+{% endfor %}\
+"""
+footer = ""
+trim = true
+# Collapse any run of 3+ newlines to a single blank line.
+postprocessors = [{ pattern = '\n{3,}', replace = "\n\n" }]
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+# The <!-- N --> prefixes force section order (group_by sorts alphabetically);
+# the template strips them with | striptags.
+commit_parsers = [
+  { message = "^Merge", skip = true },
+  { message = '^chore\(release\)', skip = true },
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^fix", group = "<!-- 1 -->Fixed" },
+  { message = "^perf", group = "<!-- 2 -->Changed" },
+  { message = "^refactor", group = "<!-- 2 -->Changed" },
+  { message = "^docs?", group = "<!-- 3 -->Documentation" },
+  { message = "^test", group = "<!-- 4 -->Tests" },
+  { message = "^chore", group = "<!-- 5 -->Internal" },
+  { message = "^ci", group = "<!-- 5 -->Internal" },
+  { message = "^build", group = "<!-- 5 -->Internal" },
+  { message = "^revert", group = "<!-- 6 -->Reverted" },
+  # Catch-all for the pre-convention commits (the repo's first three).
+  { message = ".*", group = "<!-- 7 -->Other" },
+]
+filter_commits = false
+tag_pattern = '^v[0-9]+\.[0-9]+\.[0-9]+'
+ignore_tags = ""
+topo_order = false
+sort_commits = "oldest"
