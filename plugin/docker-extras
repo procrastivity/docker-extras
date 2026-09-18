@@ -2,11 +2,11 @@
 # docker-extras — Docker CLI plugin dispatcher for the docker-extras tools.
 #
 # Docker only accepts plugin binaries named docker-[a-z][a-z0-9]* (no hyphens
-# after the prefix), so a multi-word tool like docker-volume-seed cannot be a
+# after the prefix), so a multi-word tool like docker-extras-volume-seed cannot be a
 # plugin itself. This one plugin fronts them all:
 #
 #   docker extras                  list the tools and where each resolves
-#   docker extras volume-seed …    exec docker-volume-seed with the args given
+#   docker extras volume-seed …    exec docker-extras-volume-seed with the args given
 #
 # Install: `make install-plugin` symlinks this file into ~/.docker/cli-plugins,
 # so a checkout's bin/ is preferred and PATH is the fallback. Docker invokes
@@ -29,7 +29,7 @@ self="$(readlink -f "${BASH_SOURCE[0]}")"
 bindir="$(cd "$(dirname "$self")/.." 2>/dev/null && pwd)/bin"
 
 resolve() { # resolve NAME → path on stdout, or return 1
-  local exe="docker-$1"
+  local exe="docker-extras-$1"
   if [ -x "$bindir/$exe" ]; then
     printf '%s\n' "$bindir/$exe"
   else
@@ -56,7 +56,7 @@ list_tools() {
     if path="$(resolve "$t")"; then
       printf '  %-14s %s\n' "$t" "$path"
     else
-      printf '  %-14s (not installed — docker-%s not found)\n' "$t" "$t"
+      printf '  %-14s (not installed — docker-extras-%s not found)\n' "$t" "$t"
     fi
   done
   echo
@@ -77,6 +77,6 @@ tool="$1"; shift
 if path="$(resolve "$tool")"; then
   exec "$path" "$@"
 fi
-printf 'docker-extras: unknown tool: %s (docker-%s not found)\n' "$tool" "$tool" >&2
+printf 'docker-extras: unknown tool: %s (docker-extras-%s not found)\n' "$tool" "$tool" >&2
 list_tools >&2
 exit 1

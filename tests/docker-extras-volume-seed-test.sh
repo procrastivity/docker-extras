@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Regression harness for docker-volume-seed. Its headline case is C1: a seed
+# Regression harness for docker-extras-volume-seed. Its headline case is C1: a seed
 # truncated to a 512-byte boundary must be REFUSED before the target volume
 # changes, not silently accepted (a block-aligned truncation is exactly the
 # case a `tar -tf` header walk misses — see the sha256/bytes= gate in
-# docker-volume-seed.sh).
+# docker-extras-volume-seed.sh).
 #
 # Run it by hand:
-#   make test          (or: bash tests/docker-volume-seed-test.sh)
+#   make test          (or: bash tests/docker-extras-volume-seed-test.sh)
 #
 # It needs a reachable docker daemon and skips (exit 0) without one, so a
 # daemonless machine is not a failure. CI runs it on a GitHub-hosted runner,
@@ -20,14 +20,14 @@
 # directory is its own mktemp -d. Cleanup runs from an EXIT trap, so a failed
 # assertion still removes everything.
 #
-# It tests the WORKING TREE copy of docker-volume-seed, not whatever sits on
+# It tests the WORKING TREE copy of docker-extras-volume-seed, not whatever sits on
 # PATH, so a local fix is graded before it is installed anywhere.
 
 set -euo pipefail
 
-say() { printf 'docker-volume-seed-test: %s\n' "$*" >&2; }
-ok()  { printf 'docker-volume-seed-test: ok: %s\n' "$1"; pass=$((pass + 1)); }
-bad() { printf 'docker-volume-seed-test: FAIL: %s\n' "$1"; fail=$((fail + 1)); }
+say() { printf 'docker-extras-volume-seed-test: %s\n' "$*" >&2; }
+ok()  { printf 'docker-extras-volume-seed-test: ok: %s\n' "$1"; pass=$((pass + 1)); }
+bad() { printf 'docker-extras-volume-seed-test: FAIL: %s\n' "$1"; fail=$((fail + 1)); }
 
 pass=0
 fail=0
@@ -41,7 +41,7 @@ if ! command -v docker >/dev/null 2>&1 \
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-dvs="$repo_root/bin/docker-volume-seed"
+dvs="$repo_root/bin/docker-extras-volume-seed"
 [ -f "$dvs" ] || { say "error: $dvs not found"; exit 1; }
 
 D="$(mktemp -d)"
@@ -66,7 +66,7 @@ mkvol() {
   docker volume create "$new_vol" >/dev/null
 }
 # Same, but does not create the volume yet — for the --allow-create cases,
-# where docker-volume-seed itself is the thing that creates it.
+# where docker-extras-volume-seed itself is the thing that creates it.
 namevol() {
   new_vol="dvsprobe-$1-$$"
   vols+=("$new_vol")

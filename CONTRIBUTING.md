@@ -11,7 +11,7 @@ satisfy all of these:
    arrives through a flag or an environment variable with a sane default.
 3. **Names its damage.** A destructive tool says what it will change before it
    changes it, asks unless `--yes`, and its exit codes let a caller tell
-   "nothing changed" from "the target changed" (see `docker-volume-seed`'s
+   "nothing changed" from "the target changed" (see `docker-extras-volume-seed`'s
    exit-code contract for the model).
 4. **Self-documenting.** `--help` carries the full usage, and a header comment
    explains the non-obvious decisions. A page in `docs/` mirrors both.
@@ -23,7 +23,7 @@ satisfy all of these:
 
 Mechanics:
 
-- Put the executable in `bin/docker-<name>` (no `.sh` suffix, mode 755).
+- Put the executable in `bin/docker-extras-<name>` (no `.sh` suffix, mode 755).
 - Add the name to `TOOLS` in `plugin/docker-extras`.
 - Add a row to the README table, a page in `docs/`, and a harness in `tests/`
   wired into the Makefile's `test` target.

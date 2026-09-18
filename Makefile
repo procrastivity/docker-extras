@@ -26,4 +26,4 @@ lint:
 	shellcheck bin/docker-* plugin/docker-extras tests/*.sh
 
 test:
-	bash tests/docker-volume-seed-test.sh
+	bash tests/docker-extras-volume-seed-test.sh

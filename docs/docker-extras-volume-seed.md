@@ -1,4 +1,4 @@
-# docker-volume-seed
+# docker-extras-volume-seed
 
 Archive a Docker named volume to a seed file, and restore a seed file into
 another named volume. The tool knows only Docker: compose projects are
@@ -6,9 +6,9 @@ discovered from the labels Docker Compose stamps on volumes and containers,
 never from compose files or application layout.
 
 ```
-docker-volume-seed capture --from-volume VOL [--name NAME] [--data-dir DIR]
+docker-extras-volume-seed capture --from-volume VOL [--name NAME] [--data-dir DIR]
                            [--image IMG] [--yes] [--report FILE]
-docker-volume-seed restore --to-volume VOL [--name NAME] [--data-dir DIR]
+docker-extras-volume-seed restore --to-volume VOL [--name NAME] [--data-dir DIR]
                            [--allow-create] [--label KEY=VALUE]...
                            [--expect-image IMG] [--yes] [--force]
                            [--no-verify] [--report FILE]
@@ -75,14 +75,14 @@ labels and is cleared in place.
 Copy one database volume into another:
 
 ```sh
-docker-volume-seed capture --from-volume myapp-demo_database_data --name myapp --image mysql:8.0
-docker-volume-seed restore --to-volume dev-myapp_database_data --name myapp
+docker-extras-volume-seed capture --from-volume myapp-demo_database_data --name myapp --image mysql:8.0
+docker-extras-volume-seed restore --to-volume dev-myapp_database_data --name myapp
 ```
 
 Seed a volume so the compose stack that owns it adopts it silently:
 
 ```sh
-docker-volume-seed restore --to-volume dev-myapp_database_data --name myapp \
+docker-extras-volume-seed restore --to-volume dev-myapp_database_data --name myapp \
   --allow-create --yes \
   --label com.docker.compose.project=dev-myapp \
   --label com.docker.compose.volume=database_data

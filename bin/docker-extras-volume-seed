@@ -1,10 +1,10 @@
 #!/bin/bash
-# docker-volume-seed — archive a Docker named volume to a seed file, and
+# docker-extras-volume-seed — archive a Docker named volume to a seed file, and
 # restore a seed file into another named volume.
 #
 # Usage:
-#   docker-volume-seed capture --from-volume VOL [--name NAME] [--data-dir DIR]
-#   docker-volume-seed restore --to-volume VOL [--name NAME] [--data-dir DIR]
+#   docker-extras-volume-seed capture --from-volume VOL [--name NAME] [--data-dir DIR]
+#   docker-extras-volume-seed restore --to-volume VOL [--name NAME] [--data-dir DIR]
 #                              [--label KEY=VALUE]... [--yes] [--force]
 #
 # This tool knows only Docker. It does not know compose files, app layouts, or
@@ -58,7 +58,7 @@
 
 set -euo pipefail
 
-say() { printf 'docker-volume-seed: %s\n' "$*" >&2; }
+say() { printf 'docker-extras-volume-seed: %s\n' "$*" >&2; }
 
 # Exit codes. A caller has to be able to tell the operator the truth about the
 # target volume, so the failure codes split on whether the destructive clear
@@ -74,12 +74,12 @@ say() { printf 'docker-volume-seed: %s\n' "$*" >&2; }
 # die added later reports "intact", which is what it will be — so a new step
 # that destroys the target must use die_after_clear, not die.
 # Any other code (127 — not found) means the tool never ran; read it as 1.
-die() { printf 'docker-volume-seed: error: %s\n' "$*" >&2; exit 1; }
-die_after_clear() { printf 'docker-volume-seed: error: %s\n' "$*" >&2; exit 2; }
+die() { printf 'docker-extras-volume-seed: error: %s\n' "$*" >&2; exit 1; }
+die_after_clear() { printf 'docker-extras-volume-seed: error: %s\n' "$*" >&2; exit 2; }
 
 confirm() {
   local reply
-  printf 'docker-volume-seed: %s [y/N] ' "$1" >&2
+  printf 'docker-extras-volume-seed: %s [y/N] ' "$1" >&2
   read -r reply </dev/tty 2>/dev/null || { printf '\n' >&2; return 1; }
   case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
 }
@@ -113,13 +113,13 @@ on_exit() {
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  docker-volume-seed capture --from-volume VOL [--name NAME] [--data-dir DIR]
+  docker-extras-volume-seed capture --from-volume VOL [--name NAME] [--data-dir DIR]
                              [--image IMG] [--yes] [--report FILE]
-  docker-volume-seed restore --to-volume VOL [--name NAME] [--data-dir DIR]
+  docker-extras-volume-seed restore --to-volume VOL [--name NAME] [--data-dir DIR]
                              [--allow-create] [--label KEY=VALUE]...
                              [--expect-image IMG] [--yes] [--force]
                              [--no-verify] [--report FILE]
-  docker-volume-seed --help
+  docker-extras-volume-seed --help
 
 Archive a Docker named volume to a seed file, or restore that seed into
 another named volume. Running containers that use the volume are stopped
@@ -161,7 +161,7 @@ restore (DESTRUCTIVE — replaces the target volume's contents)
 common
   --name NAME        seed base name: NAME.tar + NAME.meta (default: db-seed)
   --data-dir DIR     seed directory
-                     (default: ${XDG_DATA_HOME:-~/.local/share}/docker-volume-seed)
+                     (default: ${XDG_DATA_HOME:-~/.local/share}/docker-extras-volume-seed)
   --yes, -y          do not ask for confirmation (required when no tty)
   --report FILE      record what was stopped, one tab-separated line each:
                        down<TAB>PROJECT<TAB>service,service
@@ -185,11 +185,11 @@ target untouched. A seed with neither field falls back to a tar -tf header
 check in the same place instead of being refused outright.
 
 Example — copy one database volume into another:
-  docker-volume-seed capture --from-volume xesapps-demo_database_data --name xesapps --image mysql:8.0
-  docker-volume-seed restore --to-volume dev-xesapps_database_data --name xesapps
+  docker-extras-volume-seed capture --from-volume xesapps-demo_database_data --name xesapps --image mysql:8.0
+  docker-extras-volume-seed restore --to-volume dev-xesapps_database_data --name xesapps
 
 Example — seed a volume so the stack that owns it adopts it silently:
-  docker-volume-seed restore --to-volume dev-xesapps_database_data --name xesapps \
+  docker-extras-volume-seed restore --to-volume dev-xesapps_database_data --name xesapps \
     --allow-create --yes \
     --label com.docker.compose.project=dev-xesapps \
     --label com.docker.compose.volume=database_data
@@ -209,7 +209,7 @@ esac
 
 vol=""
 name="db-seed"
-data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/docker-volume-seed"
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/docker-extras-volume-seed"
 assume_yes=""
 force=""
 no_verify=""
@@ -575,7 +575,7 @@ do_restore() {
        ($archive.zst exists — it is the older compressed seed format; convert
        it first: zstd -d --rm '$archive.zst' && mv '$archive.meta' '$meta')"
     die "seed not found: $archive
-       create one first: docker-volume-seed capture --from-volume SOURCE_VOL --name $name"
+       create one first: docker-extras-volume-seed capture --from-volume SOURCE_VOL --name $name"
   fi
   # relabel is set when the target exists but does not already carry the
   # requested labels. Docker has no "set labels on an existing volume", so the

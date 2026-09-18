@@ -9,14 +9,14 @@ infrastructure.
 
 | Tool | What it does |
 | --- | --- |
-| [`docker-volume-seed`](docs/docker-volume-seed.md) | Archive a named volume to a verified seed file, and restore a seed into another named volume — with an image lock, integrity checks before anything destructive, and honest exit codes. |
+| [`docker-extras-volume-seed`](docs/docker-extras-volume-seed.md) | Archive a named volume to a verified seed file, and restore a seed into another named volume — with an image lock, integrity checks before anything destructive, and honest exit codes. |
 
 Every tool prints its full usage with `--help`.
 
 ## Install
 
 ```sh
-make install                 # copies bin/docker-* into ~/.local/bin
+make install                 # copies bin/docker-extras-* into ~/.local/bin
 make install PREFIX=/usr/local
 ```
 
