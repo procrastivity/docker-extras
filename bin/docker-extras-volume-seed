@@ -588,10 +588,10 @@ do_restore() {
   # seed was unusable all along.
   local want="" bytes="" sha="" legacy=""
   if [ -f "$meta" ]; then
-    # A sidecar converted from the older compressed seed format carries the
-    # image under mysql_image=, so fall back to that key.
+    # image= only — this tool's own key. A caller that captures while the
+    # project is down must pass the image explicitly (capture --image IMG);
+    # a provenance key appended by a wrapper is not read here.
     want="$(meta_value image "$meta")" || want=""
-    [ -n "$want" ] || { want="$(meta_value mysql_image "$meta")" || want=""; }
     bytes="$(meta_value bytes "$meta")" || bytes=""
     sha="$(meta_value sha256 "$meta")" || sha=""
     # A malformed value is no value. Treat it as absent rather than compare
