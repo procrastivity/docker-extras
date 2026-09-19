@@ -23,7 +23,7 @@ uninstall-plugin:
 	rm -f "$(PLUGIN_DIR)/docker-extras"
 
 lint:
-	shellcheck bin/docker-* plugin/docker-extras tests/*.sh contrib/release contrib/check-commit-msg scripts/install.sh
+	shellcheck .agents/setup .agents/resume bin/docker-* plugin/docker-extras tests/*.sh contrib/release contrib/check-commit-msg scripts/install.sh
 
 test:
 	bash tests/docker-extras-volume-seed-test.sh
