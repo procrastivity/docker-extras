@@ -3,6 +3,14 @@ set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 
+run_as_root() {
+  if [ "${EUID}" -eq 0 ]; then
+    "$@"
+  else
+    sudo -n "$@"
+  fi
+}
+
 step() {
   local name="$1"
   shift
@@ -15,15 +23,55 @@ install_system_packages() {
     return
   fi
 
-  local -a apt_cmd
-  if [ "${EUID}" -eq 0 ]; then
-    apt_cmd=(apt-get)
-  else
-    apt_cmd=(sudo -n apt-get)
+  run_as_root apt-get update
+  run_as_root apt-get install -y --no-install-recommends direnv
+}
+
+docker_packages_installed() {
+  local package status
+  local -a packages=(
+    docker-ce
+    docker-ce-cli
+    containerd.io
+    docker-buildx-plugin
+    docker-compose-plugin
+  )
+
+  for package in "${packages[@]}"; do
+    status="$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)"
+    if [ "$status" != 'install ok installed' ]; then
+      return 1
+    fi
+  done
+}
+
+install_docker() {
+  if docker_packages_installed; then
+    return
   fi
 
-  "${apt_cmd[@]}" update
-  "${apt_cmd[@]}" install -y --no-install-recommends direnv
+  local architecture codename repo_file repo_line
+  architecture="$(dpkg --print-architecture)"
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  codename="$VERSION_CODENAME"
+  repo_file=/etc/apt/sources.list.d/docker.list
+  repo_line="deb [arch=${architecture} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${codename} stable"
+
+  run_as_root install -m 0755 -d /etc/apt/keyrings
+  if [ ! -s /etc/apt/keyrings/docker.asc ]; then
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      https://download.docker.com/linux/debian/gpg \
+      | run_as_root tee /etc/apt/keyrings/docker.asc >/dev/null
+    run_as_root chmod a+r /etc/apt/keyrings/docker.asc
+  fi
+  if ! grep -Fqx "$repo_line" "$repo_file" 2>/dev/null; then
+    printf '%s\n' "$repo_line" | run_as_root tee "$repo_file" >/dev/null
+  fi
+
+  run_as_root apt-get update
+  run_as_root apt-get install -y --no-install-recommends \
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 }
 
 install_nix() {
@@ -118,6 +166,7 @@ verify_dev_shell() {
 }
 
 step 'installing direnv' install_system_packages
+step 'installing Docker Engine' install_docker
 step 'installing Nix' install_nix
 step 'loading Nix into this setup process' load_nix
 step 'installing nix-direnv' install_nix_direnv

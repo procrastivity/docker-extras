@@ -54,6 +54,15 @@ make test                    # regression harness (needs a docker daemon; skips 
 make check                   # lint + test, the release gate
 ```
 
+In an Amp orb, `.agents/setup` installs Docker Engine and `.amp/services.yaml`
+declares its supervised daemon. Start declared services before running the
+Docker-backed checks:
+
+```sh
+amp orb services ensure
+make check
+```
+
 With [nix](https://install.determinate.systems) and direnv, `direnv allow`
 loads a dev shell pinning shellcheck, git-cliff, gh, and pre-commit;
 without nix, bring those tools yourself.
