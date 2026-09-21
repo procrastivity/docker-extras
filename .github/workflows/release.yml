@@ -31,7 +31,8 @@ jobs:
         env:
           REQUIRE_DOCKER: "1"
       # dist stamps the plugin VERSION from git describe (the tag, here)
-      # and copies the installer; checksums owns the whole SHA256SUMS.
+      # and copies the installer/uninstaller; checksums owns the whole
+      # SHA256SUMS.
       - name: Build release assets
         run: make dist checksums
       # The release body is the annotated tag's message — contrib/release
@@ -45,4 +46,5 @@ jobs:
             --notes-from-tag \
             dist/docker-extras.tar.gz \
             dist/docker-extras-install.sh \
+            dist/docker-extras-uninstall.sh \
             dist/SHA256SUMS
