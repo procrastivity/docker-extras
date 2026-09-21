@@ -43,7 +43,9 @@ while IFS='|' read -r kind first second; do
     plugin_name) plugin_name="$first" ;;
     plugin_path) plugin_path="$first" ;;
     file)
-      [ -n "$first" ] && [ -n "$second" ] || die "malformed file entry in $STATE_FILE"
+      if [ -z "$first" ] || [ -z "$second" ]; then
+        die "malformed file entry in $STATE_FILE"
+      fi
       printf '%s\n' "$first|$second" >> "$files"
       ;;
     "") ;;
@@ -63,8 +65,9 @@ while IFS='|' read -r path expected; do
     "$plugin_path") [ -n "$plugin_path" ] || die "malformed plugin entry in $STATE_FILE" ;;
     *) die "refusing to remove path outside the recorded installation: $path" ;;
   esac
-  [ -f "$path" ] && [ ! -L "$path" ] ||
+  if [ ! -f "$path" ] || [ -L "$path" ]; then
     die "refusing to remove missing or symlinked file: $path"
+  fi
   actual=$(hash_file "$path")
   [ "$actual" = "$expected" ] ||
     die "refusing to remove modified file: $path"
