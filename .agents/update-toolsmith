@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Setup installs the checkout supplied to the orb; on-demand runs advance main.
+if [[ $# -gt 1 || ( $# -eq 1 && $1 != --install-only ) ]]; then
+  echo "usage: .agents/update-toolsmith [--install-only]" >&2
+  exit 2
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+toolsmith_repo="$(realpath "$script_dir/../../repos/toolsmith")"
+toolsmith_link="$HOME/.local/share/toolsmith"
+cli_link=/usr/local/bin/toolsmith
+
+if [[ $(git -C "$toolsmith_repo" branch --show-current) != main ]]; then
+  echo "Toolsmith must be on main" >&2
+  exit 1
+fi
+if [[ -n $(git -C "$toolsmith_repo" status --porcelain) ]]; then
+  echo "Toolsmith has local changes; refusing to update or build them" >&2
+  exit 1
+fi
+if [[ $# -eq 0 ]]; then
+  git -C "$toolsmith_repo" pull --ff-only origin main
+fi
+
+expected_commit="$(git -C "$toolsmith_repo" rev-parse HEAD)"
+echo "Building Toolsmith $expected_commit" >&2
+candidate="$(cd "$toolsmith_repo" && nix build --no-link --print-out-paths .#default)"
+candidate_bin="$candidate/bin/toolsmith"
+
+if [[ $("$candidate_bin" version --json | jq -r '.commit') != "$expected_commit" ]]; then
+  echo "candidate Toolsmith version does not match checkout $expected_commit" >&2
+  exit 1
+fi
+"$candidate_bin" manifest --json | jq -e '.contract == "toolsmith/v1" and (.manifest_digest | type == "string")' >/dev/null
+"$candidate_bin" new --help >/dev/null
+
+mkdir -p "$(dirname "$toolsmith_link")"
+if [[ -e "$toolsmith_link" && ! -L "$toolsmith_link" ]]; then
+  echo "refusing to replace non-symlink $toolsmith_link" >&2
+  exit 1
+fi
+if [[ -L "$cli_link" ]]; then
+  if [[ $(readlink "$cli_link") != "$toolsmith_link/bin/toolsmith" ]]; then
+    echo "refusing to replace unexpected $cli_link symlink" >&2
+    exit 1
+  fi
+elif [[ -e "$cli_link" ]]; then
+  echo "refusing to replace non-symlink $cli_link" >&2
+  exit 1
+else
+  sudo ln -s "$toolsmith_link/bin/toolsmith" "$cli_link"
+fi
+
+temporary_link="$toolsmith_link.tmp.$$"
+ln -s "$candidate" "$temporary_link"
+trap 'rm -f "$temporary_link"' EXIT
+mv -Tf "$temporary_link" "$toolsmith_link"
+
+if [[ $(readlink -f "$(command -v toolsmith)") != "$candidate_bin" ]] ||
+   [[ $(toolsmith version --json | jq -r '.commit') != "$expected_commit" ]]; then
+  echo "Toolsmith on PATH does not match checkout $expected_commit" >&2
+  exit 1
+fi
+toolsmith version --json
