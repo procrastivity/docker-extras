@@ -178,6 +178,32 @@ verify_dev_shell() {
   '
 }
 
+install_toolsmith() {
+  local checkout="$repo_root/../repos/toolsmith"
+  local out_link="$HOME/.local/share/toolsmith"
+  local bin="$HOME/.local/bin/toolsmith"
+
+  [ -f "$checkout/flake.nix" ] || {
+    printf 'orb setup: Toolsmith additional checkout missing: %s\n' "$checkout" >&2
+    return 1
+  }
+
+  mkdir -p "$(dirname "$out_link")" "$(dirname "$bin")"
+  (cd "$checkout" && nix build --out-link "$out_link" .#default)
+
+  # Do not replace a separate Toolsmith installation in the user's bin dir.
+  if [ -e "$bin" ] || [ -L "$bin" ]; then
+    if [ ! -L "$bin" ] || [ "$(readlink "$bin")" != "$out_link/bin/toolsmith" ]; then
+      printf 'orb setup: refusing to replace existing %s\n' "$bin" >&2
+      return 1
+    fi
+  else
+    ln -s "$out_link/bin/toolsmith" "$bin"
+  fi
+
+  "$out_link/bin/toolsmith" version --json
+}
+
 step 'installing direnv' install_system_packages
 step 'installing Docker Engine' install_docker
 step 'installing Nix' install_nix
@@ -186,5 +212,6 @@ step 'installing nix-direnv' install_nix_direnv
 step 'allowing the repository direnv configuration' allow_direnv
 step 'persisting the Nix dev shell for login shells' persist_nix_environment
 step 'warming and verifying the locked dev shell' verify_dev_shell
+step 'building Toolsmith from the additional checkout' install_toolsmith
 
 printf 'orb setup: ready (%s)\n' "$repo_root" >&2
