@@ -10,9 +10,9 @@
 #
 # Install: `make install-plugin` symlinks this file into ~/.docker/cli-plugins,
 # so a checkout's bin/ is preferred and PATH is the fallback. Docker invokes
-# the plugin with the subcommand name repeated as the first argument
-# ("extras"); a leading "extras" is therefore dropped, which also keeps direct
-# invocation (docker-extras volume-seed …) working.
+# the plugin with its subcommand name repeated as the first argument; the
+# dispatcher derives that name from the path it was invoked through, so a
+# copied or symlinked `docker-tools` also accepts `docker tools …`.
 
 set -euo pipefail
 
@@ -28,7 +28,10 @@ TOOLS=(volume-seed)
 # bin/ next to this file's real location — resolves through the
 # ~/.docker/cli-plugins symlink back into the checkout. Empty when this file
 # was copied somewhere without a sibling bin/ (PATH is then the only source).
-self="$(readlink -f "${BASH_SOURCE[0]}")"
+invoked="${BASH_SOURCE[0]}"
+plugin_name="${invoked##*/}"
+plugin_name="${plugin_name#docker-}"
+self="$(readlink -f "$invoked")"
 bindir="$(cd "$(dirname "$self")/.." 2>/dev/null && pwd)/bin"
 
 resolve() { # resolve NAME → path on stdout, or return 1
@@ -54,7 +57,7 @@ EOF
 
 list_tools() {
   local t path
-  echo "docker-extras $VERSION — tools:"
+  echo "docker-$plugin_name $VERSION — tools:"
   for t in "${TOOLS[@]}"; do
     if path="$(resolve "$t")"; then
       printf '  %-14s %s\n' "$t" "$path"
@@ -63,12 +66,12 @@ list_tools() {
     fi
   done
   echo
-  echo "Run one: docker extras TOOL [ARGS…]  (TOOL --help for its usage)"
+  echo "Run one: docker $plugin_name TOOL [ARGS…]  (TOOL --help for its usage)"
 }
 
 case "${1:-}" in
   docker-cli-plugin-metadata) metadata; exit 0 ;;
-  extras) shift ;;
+  "$plugin_name") shift ;;
 esac
 
 case "${1:-}" in
@@ -80,6 +83,6 @@ tool="$1"; shift
 if path="$(resolve "$tool")"; then
   exec "$path" "$@"
 fi
-printf 'docker-extras: unknown tool: %s (docker-extras-%s not found)\n' "$tool" "$tool" >&2
+printf 'docker-%s: unknown tool: %s (docker-extras-%s not found)\n' "$plugin_name" "$tool" "$tool" >&2
 list_tools >&2
 exit 1

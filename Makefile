@@ -1,6 +1,7 @@
 PREFIX ?= $(HOME)/.local
 BINDIR = $(PREFIX)/bin
 PLUGIN_DIR ?= $(HOME)/.docker/cli-plugins
+PLUGIN_NAME ?= extras
 
 TOOLS = $(wildcard bin/docker-*)
 
@@ -17,16 +18,17 @@ uninstall:
 # so the link keeps a checkout's bin/ preferred over PATH.
 install-plugin:
 	install -d "$(PLUGIN_DIR)"
-	ln -sf "$(abspath plugin/docker-extras)" "$(PLUGIN_DIR)/docker-extras"
+	ln -sf "$(abspath plugin/docker-extras)" "$(PLUGIN_DIR)/docker-$(PLUGIN_NAME)"
 
 uninstall-plugin:
-	rm -f "$(PLUGIN_DIR)/docker-extras"
+	rm -f "$(PLUGIN_DIR)/docker-$(PLUGIN_NAME)"
 
 lint:
-	shellcheck .agents/setup .agents/resume bin/docker-* plugin/docker-extras tests/*.sh contrib/release contrib/check-commit-msg scripts/install.sh
+	shellcheck .agents/setup .agents/resume bin/docker-* plugin/docker-extras tests/*.sh contrib/release contrib/check-commit-msg scripts/install.sh scripts/uninstall.sh
 
 test:
 	bash tests/docker-extras-volume-seed-test.sh
+	bash tests/install-uninstall-test.sh
 
 check: lint test
 
@@ -76,9 +78,10 @@ dist:
 	tar -czf dist/docker-extras.tar.gz -C dist/stage .
 	rm -rf dist/stage
 	cp scripts/install.sh dist/docker-extras-install.sh
+	cp scripts/uninstall.sh dist/docker-extras-uninstall.sh
 
 # Explicit names, not a glob: dist/ also collects non-release files
 # (RELEASE_NOTES.md), and a glob would silently checksum whatever happens
 # to be there.
 checksums:
-	cd dist && sha256sum docker-extras.tar.gz docker-extras-install.sh > SHA256SUMS
+	cd dist && sha256sum docker-extras.tar.gz docker-extras-install.sh docker-extras-uninstall.sh > SHA256SUMS

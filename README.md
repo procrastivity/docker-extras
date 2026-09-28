@@ -17,11 +17,31 @@ Every tool prints its full usage with `--help`.
 
 From the latest release — tools into `~/.local/bin`, plus the `docker extras`
 CLI plugin (set `DOCKER_EXTRAS_NO_PLUGIN=1` to skip it; `DOCKER_EXTRAS_VERSION=vX.Y.Z`
-pins a version, `DOCKER_EXTRAS_INSTALL_DIR` changes the destination):
+pins a version, `DOCKER_EXTRAS_INSTALL_DIR` changes the destination, and
+`DOCKER_EXTRAS_PLUGIN_NAME=tools` installs `docker tools` instead):
 
 ```sh
 curl -fsSL https://github.com/procrastivity/docker-extras/releases/latest/download/docker-extras-install.sh | sh
 ```
+
+To install the plugin under another safe Docker command name:
+
+```sh
+curl -fsSL https://github.com/procrastivity/docker-extras/releases/latest/download/docker-extras-install.sh | DOCKER_EXTRAS_PLUGIN_NAME=tools sh
+```
+
+The installer records the exact files it wrote, including the selected plugin
+name, under `${XDG_STATE_HOME:-~/.local/state}/docker-extras`. To remove an
+installation made by this installer:
+
+```sh
+curl -fsSL https://github.com/procrastivity/docker-extras/releases/latest/download/docker-extras-uninstall.sh | sh
+```
+
+The uninstaller removes only files whose recorded checksums still match. It
+refuses to guess for older installations without a record and refuses to
+remove files that were modified after installation. Docker plugin names must
+start with a lowercase letter and contain only lowercase letters and digits.
 
 From a checkout:
 
@@ -37,6 +57,8 @@ themselves. One umbrella plugin fronts them instead:
 
 ```sh
 make install-plugin          # symlinks plugin/docker-extras into ~/.docker/cli-plugins
+make install-plugin PLUGIN_NAME=tools  # expose it as docker tools
+make uninstall-plugin PLUGIN_NAME=tools
 
 docker extras                # list the tools
 docker extras volume-seed --help
@@ -83,7 +105,8 @@ commit, and no CHANGELOG.md is committed: the notes travel in the tag.
 The tag workflow re-runs the gate, builds the assets (`make dist` stamps
 the plugin VERSION from the tag), and publishes the GitHub Release —
 body from the tag message (`--notes-from-tag`), assets
-`docker-extras.tar.gz`, `docker-extras-install.sh`, and `SHA256SUMS`.
+`docker-extras.tar.gz`, `docker-extras-install.sh`,
+`docker-extras-uninstall.sh`, and `SHA256SUMS`.
 `make changelog` renders a full local changelog into `dist/` on demand.
 
 ## License
