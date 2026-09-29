@@ -7,7 +7,7 @@ import (
 func main() {
 	pluginName := pluginNameFromExecutable(os.Args[0])
 	if err := Execute(os.Args[1:], os.Stdout, os.Stderr, version, pluginName); err != nil {
-		os.Exit(1)
+		os.Exit(commandExitCode(err))
 	}
 }
 

@@ -70,7 +70,7 @@ func TestNestedHelpAndPluginNameNormalization(t *testing.T) {
 	}
 }
 
-func TestLeavesFailClearlyWithoutCallingDocker(t *testing.T) {
+func TestCaptureRequiresVolumeAndRestoreStillRefusesWithoutCallingDocker(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "docker-called")
 	bin := t.TempDir()
 	docker := filepath.Join(bin, "docker")
@@ -82,12 +82,19 @@ func TestLeavesFailClearlyWithoutCallingDocker(t *testing.T) {
 	for _, leaf := range []string{"capture", "restore"} {
 		var stdout, stderr bytes.Buffer
 		err := Execute([]string{"volume", "seed", leaf}, &stdout, &stderr, "dev", "extras")
-		var commandErr *commandError
-		if !errors.As(err, &commandErr) {
-			t.Fatalf("%s error = %v, want *commandError", leaf, err)
-		}
-		if !strings.Contains(stderr.String(), "not implemented yet") {
-			t.Fatalf("%s stderr = %q", leaf, stderr.String())
+		if leaf == "capture" {
+			var exitErr *commandExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+				t.Fatalf("capture error = %v, want preflight exit 1", err)
+			}
+			if !strings.Contains(stderr.String(), "capture requires --from-volume") {
+				t.Fatalf("capture stderr = %q", stderr.String())
+			}
+		} else {
+			var commandErr *commandError
+			if !errors.As(err, &commandErr) || !strings.Contains(stderr.String(), "not implemented yet") {
+				t.Fatalf("restore error=%v stderr=%q, want refusing commandError", err, stderr.String())
+			}
 		}
 		if stdout.Len() != 0 {
 			t.Fatalf("%s unexpectedly wrote stdout: %q", leaf, stdout.String())
@@ -145,8 +152,8 @@ func TestDockerCompletionProtocol(t *testing.T) {
 			if !strings.Contains(help, "volume") {
 				t.Fatalf("Docker did not recognize plugin %q: %s", pluginName, help)
 			}
-			if output, err := runDockerFailure(docker, env, pluginName, "volume", "seed", "capture"); err == nil || !strings.Contains(output, "not implemented yet") {
-				t.Fatalf("Docker dispatch for %q output=%q err=%v, want the nonfunctional leaf refusal", pluginName, output, err)
+			if output, err := runDockerFailure(docker, env, pluginName, "volume", "seed", "capture"); err == nil || !strings.Contains(output, "capture requires --from-volume") {
+				t.Fatalf("Docker dispatch for %q output=%q err=%v, want the capture preflight refusal", pluginName, output, err)
 			}
 			for _, tc := range []struct {
 				args []string

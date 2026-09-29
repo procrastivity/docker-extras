@@ -27,6 +27,7 @@ type quiesceOptions struct {
 	RestoreConfirmation string
 	Stdout              io.Writer
 	Stderr              io.Writer
+	DockerEnv           []string
 	MountPreflight      func(context.Context) error
 	Confirm             func(string) (bool, error)
 }
@@ -72,9 +73,9 @@ var errQuiesceDeclined = errors.New("aborted (no changes made)")
 const runningVolumeFormat = `{{.Names}}{{"\t"}}{{.Label "com.docker.compose.project"}}`
 const composeServiceFormat = `{{.Label "com.docker.compose.service"}}`
 
-// quiesceVolume is deliberately not connected to the public capture/restore
-// leaves. A future caller must complete all capture/restore safety checks,
-// including the daemon bind-mount probe, before invoking it.
+// quiesceVolume is called by capture only after volume/provenance validation;
+// its required bind-mount preflight runs before it surveys or stops any user.
+// Restore remains disconnected until its own safety checks are implemented.
 //
 // Successful report records retain the Bash TSV format:
 //
@@ -96,6 +97,10 @@ func quiesceVolume(ctx context.Context, options quiesceOptions) (result quiesceR
 	}
 	if options.Stderr == nil {
 		options.Stderr = io.Discard
+	}
+	dockerEnv := options.DockerEnv
+	if dockerEnv == nil {
+		dockerEnv = os.Environ()
 	}
 
 	var report *os.File
@@ -123,7 +128,7 @@ func quiesceVolume(ctx context.Context, options quiesceOptions) (result quiesceR
 		return result, fmt.Errorf("daemon bind-mount preflight failed; no users were surveyed or stopped: %w", err)
 	}
 
-	users, err := surveyVolumeUsers(ctx, options.Volume, options.Stderr)
+	users, err := surveyVolumeUsers(ctx, dockerEnv, options.Volume, options.Stderr)
 	if err != nil {
 		return result, err
 	}
@@ -148,7 +153,7 @@ func quiesceVolume(ctx context.Context, options quiesceOptions) (result quiesceR
 	for _, project := range users.Projects {
 		action := quiesceAction{Kind: "down", Project: project.Name, Services: project.Services}
 		_, _ = fmt.Fprintf(options.Stderr, "volume %s is in use — taking down compose project '%s'…\n", options.Volume, project.Name)
-		if err := runComposeDown(ctx, project.Name, options.Stdout, options.Stderr); err != nil {
+		if err := runComposeDown(ctx, dockerEnv, project.Name, options.Stdout, options.Stderr); err != nil {
 			result.Uncertain = append(result.Uncertain, action)
 			writeErr := writeQuiesceRecord(report, action.uncertainRecord())
 			return result, errors.Join(&quiesceActionError{Action: action, Err: err}, writeErr)
@@ -162,7 +167,7 @@ func quiesceVolume(ctx context.Context, options quiesceOptions) (result quiesceR
 	for _, name := range users.Containers {
 		action := quiesceAction{Kind: "stop", Name: name}
 		_, _ = fmt.Fprintf(options.Stderr, "volume %s is in use — stopping container '%s'…\n", options.Volume, name)
-		if err := runContainerStop(ctx, name, options.Stderr); err != nil {
+		if err := runContainerStop(ctx, dockerEnv, name, options.Stderr); err != nil {
 			result.Uncertain = append(result.Uncertain, action)
 			writeErr := writeQuiesceRecord(report, action.uncertainRecord())
 			return result, errors.Join(&quiesceActionError{Action: action, Err: err}, writeErr)
@@ -176,8 +181,8 @@ func quiesceVolume(ctx context.Context, options quiesceOptions) (result quiesceR
 	return result, nil
 }
 
-func surveyVolumeUsers(ctx context.Context, volume string, stderr io.Writer) (volumeUsers, error) {
-	output, err := dockerQuery(ctx, stderr,
+func surveyVolumeUsers(ctx context.Context, dockerEnv []string, volume string, stderr io.Writer) (volumeUsers, error) {
+	output, err := dockerQuery(ctx, dockerEnv, stderr,
 		"ps", "--filter", "volume="+volume, "--format", runningVolumeFormat)
 	if err != nil {
 		return volumeUsers{}, fmt.Errorf("survey running users of volume %q: %w", volume, err)
@@ -206,7 +211,7 @@ func surveyVolumeUsers(ctx context.Context, volume string, stderr io.Writer) (vo
 	}
 	sort.Strings(projects)
 	for _, project := range projects {
-		servicesOutput, err := dockerQuery(ctx, stderr,
+		servicesOutput, err := dockerQuery(ctx, dockerEnv, stderr,
 			"ps",
 			"--filter", "label=com.docker.compose.project="+project,
 			"--filter", "label=com.docker.compose.oneoff=False",
@@ -231,8 +236,9 @@ func surveyVolumeUsers(ctx context.Context, volume string, stderr io.Writer) (vo
 	return users, nil
 }
 
-func dockerQuery(ctx context.Context, stderr io.Writer, args ...string) (string, error) {
+func dockerQuery(ctx context.Context, dockerEnv []string, stderr io.Writer, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = dockerEnv
 	var stdout strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = stderr
@@ -281,17 +287,18 @@ func confirmOnTTY(stderr io.Writer, prompt string) (bool, error) {
 	return len(answer) > 0 && (answer[0] == 'y' || answer[0] == 'Y'), nil
 }
 
-func runComposeDown(ctx context.Context, project string, stdout, stderr io.Writer) error {
+func runComposeDown(ctx context.Context, dockerEnv []string, project string, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", project, "down")
 	cmd.Dir = "/"
-	cmd.Env = envWithout(os.Environ(), "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR")
+	cmd.Env = envWithout(dockerEnv, "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR")
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
 }
 
-func runContainerStop(ctx context.Context, name string, stderr io.Writer) error {
+func runContainerStop(ctx context.Context, dockerEnv []string, name string, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, "docker", "stop", "-t", "120", name)
+	cmd.Env = dockerEnv
 	cmd.Stdout = io.Discard
 	cmd.Stderr = stderr
 	return cmd.Run()

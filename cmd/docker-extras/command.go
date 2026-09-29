@@ -28,6 +28,23 @@ func (e *commandError) Error() string {
 	return fmt.Sprintf("%s is not implemented yet", e.Command)
 }
 
+type commandExitError struct {
+	Code int
+	Err  error
+}
+
+func (e *commandExitError) Error() string { return e.Err.Error() }
+
+func (e *commandExitError) Unwrap() error { return e.Err }
+
+func commandExitCode(err error) int {
+	var exitErr *commandExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.Code
+	}
+	return 1
+}
+
 func Execute(args []string, stdout, stderr io.Writer, version, pluginName string) error {
 	args = normalizePluginArgs(args, pluginName)
 	if len(args) == 1 && args[0] == "docker-cli-plugin-metadata" {
@@ -37,6 +54,11 @@ func Execute(args []string, stdout, stderr io.Writer, version, pluginName string
 	root := newRootCommand(stdout, stderr, pluginName)
 	root.SetArgs(args)
 	if err := root.Execute(); err != nil {
+		var exitErr *commandExitError
+		if errors.As(err, &exitErr) {
+			_, _ = fmt.Fprintf(stderr, "docker-%s: %s\n", pluginName, exitErr)
+			return err
+		}
 		var commandErr *commandError
 		if errors.As(err, &commandErr) {
 			_, _ = fmt.Fprintf(stderr, "docker-%s: %s\n", pluginName, commandErr)
@@ -109,9 +131,15 @@ func newVolumeCommand() *cobra.Command {
 }
 
 func newLeafCommand(name string) *cobra.Command {
+	short := fmt.Sprintf("%s a volume seed (not implemented yet)", name)
+	if name == "capture" {
+		short = "capture a named volume to a seed archive"
+	} else {
+		short = "restore a volume seed (not implemented yet)"
+	}
 	cmd := &cobra.Command{
 		Use:   name,
-		Short: fmt.Sprintf("%s a volume seed (not implemented yet)", name),
+		Short: short,
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return &commandError{Command: "volume seed " + name}
@@ -125,6 +153,7 @@ func newLeafCommand(name string) *cobra.Command {
 	if name == "capture" {
 		flags.String("from-volume", "", "existing volume to archive")
 		flags.String("image", "", "image lock to record instead of inferring")
+		cmd.RunE = runCaptureCommand
 	} else {
 		flags.String("to-volume", "", "volume to restore into")
 		flags.Bool("allow-create", false, "create the target volume when it does not exist")
