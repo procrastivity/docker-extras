@@ -5,7 +5,7 @@ PLUGIN_NAME ?= extras
 
 TOOLS = $(wildcard bin/docker-*)
 
-.PHONY: install uninstall install-plugin uninstall-plugin lint test check hooks changelog release-notes dist checksums
+.PHONY: install uninstall install-plugin uninstall-plugin lint test check go-test go-build hooks changelog release-notes dist checksums
 
 install:
 	install -d "$(BINDIR)"
@@ -31,6 +31,14 @@ test:
 	bash tests/install-uninstall-test.sh
 
 check: lint test
+
+# The Go plugin scaffold is intentionally not part of the Bash release path yet.
+go-test:
+	go test ./...
+
+go-build:
+	mkdir -p build
+	go build -o build/docker-extras ./cmd/docker-extras
 
 # Both hook types on purpose: the commit-msg hook does not install with
 # the default stage (the wip/duo family learned this the hard way).

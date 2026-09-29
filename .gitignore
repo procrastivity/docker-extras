@@ -1,3 +1,4 @@
 dist/
+build/
 .direnv/
 .amp/portals/*

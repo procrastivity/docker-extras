@@ -19,6 +19,7 @@
         devShells.default = pkgs.mkShell {
           name = "docker-extras";
           packages = with pkgs; [
+            go
             shellcheck
             git-cliff
             gh

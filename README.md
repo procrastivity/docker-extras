@@ -74,6 +74,8 @@ make hooks                   # pre-commit + commit-msg hooks (Conventional Commi
 make lint                    # shellcheck on bin/, plugin/, contrib/, scripts/, tests/
 make test                    # regression harness (needs a docker daemon; skips without one)
 make check                   # lint + test, the release gate
+go test ./...                # test the experimental Go CLI scaffold
+make go-build                # build it to build/docker-extras (not yet released)
 ```
 
 In an Amp orb, `.agents/setup` installs Docker Engine and `.amp/services.yaml`
@@ -86,7 +88,8 @@ make check
 ```
 
 With [nix](https://install.determinate.systems) and direnv, `direnv allow`
-loads a dev shell pinning shellcheck, git-cliff, gh, and pre-commit;
+loads a dev shell with Go 1.26.7 from the locked nixpkgs input, alongside
+shellcheck, git-cliff, gh, and pre-commit;
 without nix, bring those tools yourself.
 
 Want to add a tool? Read [CONTRIBUTING.md](CONTRIBUTING.md) — the admission
