@@ -16,6 +16,18 @@ docker extras volume seed restore --to-volume VOL [--name NAME] [--data-dir DIR]
 
 `--help` carries the full option reference; this page explains the design.
 
+Both commands need the Docker CLI and a reachable Docker Engine daemon. The
+daemon must be able to read and write the client-side `--data-dir` through a
+bind mount; a remote daemon normally cannot see the client's filesystem, and
+the command refuses during preflight if the round trip fails. This applies to
+local and remote contexts alike: use a data directory genuinely shared with
+the selected daemon or use a local context. Compose-labelled users require the
+Docker Compose CLI plugin. The plugin does not install shell completion; after
+separately enabling Docker CLI completion with `docker completion bash` (or
+the corresponding supported shell command), Docker can request the nested
+command and static flag candidates. Completion does not enumerate Docker
+resources or paths.
+
 ## The seed
 
 A seed is a plain uncompressed tar of the volume contents (`NAME.tar`) plus a
@@ -44,10 +56,17 @@ protections exist because of that.
    nothing else.
 3. **Named, confirmed stops.** Both directions survey what runs on the volume,
    name every compose project (with its services) and container they will
-   stop, and ask before stopping. Nothing is started back up. `--report FILE`
-   records what was actually stopped, one tab-separated line each
-   (`down<TAB>PROJECT<TAB>service,service` or `stop<TAB>CONTAINER`), so a
-   wrapper can restart exactly that.
+   stop, and print what will be stopped. Capture prompts only when users are
+   pending; restore prompts whenever `--yes` is absent, even if the target is
+   idle or will be created. `--yes` skips confirmation. Compose-owned projects
+   are stopped with `docker compose -p PROJECT down`; other attached
+   containers are stopped directly. Nothing is started back up. `--report
+   FILE` is cleared before work and records completed actions as tab-separated
+   lines (`down<TAB>PROJECT<TAB>service,service` or
+   `stop<TAB>CONTAINER`). If a stop command fails after it may have partly
+   acted, an `uncertain<TAB>...` line and warning are recorded; inspect state
+   and restart only what is needed. The report is recovery guidance, not an
+   automatic restart plan.
 
 ## Exit codes
 
@@ -59,7 +78,14 @@ protections exist because of that.
 | 3 | declined at the prompt — nothing was changed |
 
 Capture never returns 2. Any other code (for example 127) means the tool never
-ran; read it as 1.
+ran; read it as 1. Restore exit 2 means the target may have changed (cleared,
+partially restored, created, or removed); exit 1 is a refusal/failure before
+the restore changed the target. Exit 3 is an explicit prompt decline with no
+data change.
+
+These commands stop containers and bring Compose projects down on a shared
+daemon. They do not restart either. Confirm that stopping the volume's users
+is acceptable before running capture or restore, especially on a shared host.
 
 ## Labels
 

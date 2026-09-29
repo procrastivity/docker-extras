@@ -67,6 +67,22 @@ docker extras volume seed capture --help
 docker extras volume seed restore --help
 ```
 
+Capture and restore require the Docker CLI and a reachable Docker Engine
+daemon; Compose-owned projects additionally require the Docker Compose CLI
+plugin. The daemon must be able to bind-mount the local seed directory. In
+particular, a remote Docker context does not automatically share files with
+the client host, so capture/restore refuse when the daemon cannot read and
+write that directory. On a shared host, these operations stop users of the
+selected volume and do not restart them; coordinate with other users before
+running them.
+
+Docker shell completion is a separate opt-in integration, not installed by
+this plugin. Generate and enable Docker's completion script for your shell
+using `docker completion bash`, `docker completion zsh`, or the corresponding
+supported shell command, following the instructions printed by that command.
+Once enabled, Docker asks the plugin for the nested `volume seed` command and
+static flag completions.
+
 ## Development
 
 ```sh
@@ -92,6 +108,22 @@ With [nix](https://install.determinate.systems) and direnv, `direnv allow`
 loads a dev shell with Go 1.26.7 from the locked nixpkgs input, alongside
 shellcheck, git-cliff, gh, and pre-commit;
 without nix, bring those tools yourself.
+
+The port reused Toolsmith's Cobra-based Go CLI and injected stdout/stderr
+conventions (Toolsmith checkout `8ce9d56faaaa60aa8c2bde05df6e682083bc52aa`,
+module `github.com/procrastivity/toolsmith`, Go 1.23; Toolsmith contract
+v1.5), plus a structured command error and explicit exit-code mapping. This
+is dogfood, not a claim of Toolsmith contract conformance. The plugin reuses
+Cobra and injected streams, but adapts errors to the capture/restore exit
+contract (including exit 2 for a possibly changed target and exit 3 for a
+decline); it omits Toolsmith's manifest/harness projection, global
+`--json`/`--verbose` chassis, and harness-install model because this binary
+is a Docker CLI plugin. Packaging also differs: Docker discovers an
+executable named `docker-<plugin-name>` and invokes its metadata handshake,
+whereas Toolsmith's harness artifacts are projections from its installed
+binary. Toolsmith contract v1.5's `[check]` clauses and checker cover marked
+mechanical source/build properties, not behavioral parity, safety, Docker
+integration, or conformance merely because some conventions are shared.
 
 Want to add a tool? Read [CONTRIBUTING.md](CONTRIBUTING.md) — the admission
 bar is the point of the collection.
