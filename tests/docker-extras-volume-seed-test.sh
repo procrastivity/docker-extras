@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Regression harness for docker-extras-volume-seed. Its headline case is C1: a seed
+# Regression harness for the Go Docker Extras volume seed plugin. Its headline case is C1: a seed
 # truncated to a 512-byte boundary must be REFUSED before the target volume
 # changes, not silently accepted (a block-aligned truncation is exactly the
 # case a `tar -tf` header walk misses — see the sha256/bytes= gate in
-# docker-extras-volume-seed.sh).
+# cmd/docker-extras/restore.go).
 #
 # Run it by hand:
 #   make test          (or: bash tests/docker-extras-volume-seed-test.sh)
@@ -20,8 +20,8 @@
 # directory is its own mktemp -d. Cleanup runs from an EXIT trap, so a failed
 # assertion still removes everything.
 #
-# It tests the WORKING TREE copy of docker-extras-volume-seed, not whatever sits on
-# PATH, so a local fix is graded before it is installed anywhere.
+# It builds the working-tree Go CLI plugin into this test's temporary Docker
+# config and invokes every seed operation through `docker extras`.
 
 set -euo pipefail
 
@@ -47,8 +47,10 @@ if ! command -v docker >/dev/null 2>&1 \
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-dvs="$repo_root/bin/docker-extras-volume-seed"
-[ -f "$dvs" ] || { say "error: $dvs not found"; exit 1; }
+[ -f "$repo_root/go.mod" ] && [ -d "$repo_root/cmd/docker-extras" ] || {
+  say "error: Go CLI source not found under $repo_root"
+  exit 1
+}
 
 D="$(mktemp -d)"
 vols=()
@@ -62,6 +64,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Docker discovers plugins inside DOCKER_CONFIG. Keep the plugin installation
+# isolated to this fixture and leave the user's Docker CLI config untouched.
+export DOCKER_CONFIG="$D/docker-config"
+mkdir -p "$DOCKER_CONFIG/cli-plugins"
+plugin="$DOCKER_CONFIG/cli-plugins/docker-extras"
+go -C "$repo_root" build -o "$plugin" ./cmd/docker-extras
+run_seed() { docker extras volume seed "$@"; }
+
 # Reserve dvsprobe-PURPOSE-$$ and record it for cleanup, into $new_vol — a
 # global instead of a return-by-echo, because the vols+=() append has to land
 # in THIS shell, not a command-substitution subshell.
@@ -72,7 +82,7 @@ mkvol() {
   docker volume create "$new_vol" >/dev/null
 }
 # Same, but does not create the volume yet — for the --allow-create cases,
-# where docker-extras-volume-seed itself is the thing that creates it.
+# where the plugin itself is the thing that creates it.
 namevol() {
   new_vol="dvsprobe-$1-$$"
   vols+=("$new_vol")
@@ -122,7 +132,7 @@ fi
 
 say "step b: capture a good seed"
 rc=0
-bash "$dvs" capture --from-volume "$src" --name probe --data-dir "$D" \
+run_seed capture --from-volume "$src" --name probe --data-dir "$D" \
   --image alpine:latest --yes >/dev/null 2>&1 || rc=$?
 if [ "$rc" -eq 0 ] && [ -f "$D/probe.tar" ] && [ -f "$D/probe.meta" ]; then
   ok "capture exited 0 and wrote probe.tar + probe.meta"
@@ -151,7 +161,7 @@ fi
 say "step c: restore the good seed into a fresh volume"
 namevol dst; dst="$new_vol"
 rc=0
-bash "$dvs" restore --to-volume "$dst" --name probe --data-dir "$D" \
+run_seed restore --to-volume "$dst" --name probe --data-dir "$D" \
   --allow-create --expect-image alpine:latest --yes >/dev/null 2>&1 || rc=$?
 if [ "$rc" -eq 0 ]; then
   ok "restore into a fresh volume exited 0"
@@ -180,7 +190,7 @@ mkvol keep1; keep1="$new_vol"
 plant_marker "$keep1"
 
 rc=0
-bash "$dvs" restore --to-volume "$keep1" --name probe2 --data-dir "$D" \
+run_seed restore --to-volume "$keep1" --name probe2 --data-dir "$D" \
   --expect-image alpine:latest --yes >/dev/null 2>&1 || rc=$?
 if [ "$rc" -eq 1 ]; then
   ok "truncated seed is refused with exit 1 (pre-clear), not silently accepted"
@@ -210,7 +220,7 @@ mkvol keep2; keep2="$new_vol"
 plant_marker "$keep2"
 
 rc=0
-bash "$dvs" restore --to-volume "$keep2" --name probe3 --data-dir "$D" \
+run_seed restore --to-volume "$keep2" --name probe3 --data-dir "$D" \
   --expect-image alpine:latest --yes >/dev/null 2>&1 || rc=$?
 if [ "$rc" -eq 1 ]; then
   ok "a same-size bit flip is refused with exit 1 — the sha256 check caught it, not a size check"
@@ -230,7 +240,7 @@ fi
 say "step g: --no-verify lets the same corrupt seed through the gate"
 namevol nv; nv="$new_vol"
 rc=0
-bash "$dvs" restore --to-volume "$nv" --name probe3 --data-dir "$D" \
+run_seed restore --to-volume "$nv" --name probe3 --data-dir "$D" \
   --allow-create --no-verify --expect-image alpine:latest --yes \
   >/dev/null 2>&1 || rc=$?
 if [ "$rc" -ne 1 ]; then
