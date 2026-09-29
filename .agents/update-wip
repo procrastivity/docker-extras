@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Setup installs the checkout supplied to the orb; on-demand runs advance go.
+if [[ $# -gt 1 || ( $# -eq 1 && $1 != --install-only ) ]]; then
+  echo "usage: .agents/update-wip [--install-only]" >&2
+  exit 2
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+wip_repo="$(realpath "$script_dir/../../repos/wip")"
+wip_link="$HOME/.local/share/wip"
+cli_link=/usr/local/bin/wip
+
+if [[ -n $(git -C "$wip_repo" status --porcelain) ]]; then
+  echo "Wip has local changes; refusing to update or build them" >&2
+  exit 1
+fi
+if [[ $(git -C "$wip_repo" branch --show-current) != go ]]; then
+  git -C "$wip_repo" fetch origin go:refs/remotes/origin/go
+  if git -C "$wip_repo" show-ref --verify --quiet refs/heads/go; then
+    git -C "$wip_repo" switch go
+  else
+    git -C "$wip_repo" switch --track origin/go
+  fi
+fi
+if [[ $# -eq 0 ]]; then
+  git -C "$wip_repo" pull --ff-only origin go
+fi
+
+expected_commit="$(git -C "$wip_repo" rev-parse HEAD)"
+echo "Building Wip $expected_commit" >&2
+candidate="$(cd "$wip_repo" && nix build --no-link --print-out-paths .#default)"
+candidate_bin="$candidate/bin/wip"
+
+if [[ $("$candidate_bin" version --json | jq -r '.commit') != "$expected_commit" ]]; then
+  echo "candidate Wip version does not match checkout $expected_commit" >&2
+  exit 1
+fi
+"$candidate_bin" manifest --json | jq -e '.contract == "toolsmith/v1" and .tool.name == "wip" and (.manifest_digest | type == "string")' >/dev/null
+"$candidate_bin" --help >/dev/null
+
+mkdir -p "$(dirname "$wip_link")"
+if [[ -e "$wip_link" && ! -L "$wip_link" ]]; then
+  echo "refusing to replace non-symlink $wip_link" >&2
+  exit 1
+fi
+if [[ -L "$cli_link" ]]; then
+  if [[ $(readlink "$cli_link") != "$wip_link/bin/wip" ]]; then
+    echo "refusing to replace unexpected $cli_link symlink" >&2
+    exit 1
+  fi
+elif [[ -e "$cli_link" ]]; then
+  echo "refusing to replace non-symlink $cli_link" >&2
+  exit 1
+else
+  sudo ln -s "$wip_link/bin/wip" "$cli_link"
+fi
+
+temporary_link="$wip_link.tmp.$$"
+ln -s "$candidate" "$temporary_link"
+trap 'rm -f "$temporary_link"' EXIT
+mv -Tf "$temporary_link" "$wip_link"
+
+if [[ $(readlink -f "$(command -v wip)") != "$candidate_bin" ]] ||
+   [[ $(wip version --json | jq -r '.commit') != "$expected_commit" ]]; then
+  echo "Wip on PATH does not match checkout $expected_commit" >&2
+  exit 1
+fi
+wip version --json

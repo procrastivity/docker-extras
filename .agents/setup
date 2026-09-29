@@ -187,5 +187,6 @@ step 'allowing the repository direnv configuration' allow_direnv
 step 'persisting the Nix dev shell for login shells' persist_nix_environment
 step 'warming and verifying the locked dev shell' verify_dev_shell
 step 'building and verifying Toolsmith from the additional checkout' "$repo_root/.agents/update-toolsmith" --install-only
+step 'selecting go and building Wip from the additional checkout' "$repo_root/.agents/update-wip" --install-only
 
 printf 'orb setup: ready (%s)\n' "$repo_root" >&2
