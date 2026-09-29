@@ -1,24 +1,21 @@
-PREFIX ?= $(HOME)/.local
-BINDIR = $(PREFIX)/bin
 PLUGIN_DIR ?= $(HOME)/.docker/cli-plugins
 PLUGIN_NAME ?= extras
 
-TOOLS = $(wildcard bin/docker-*)
-
-.PHONY: install uninstall install-plugin uninstall-plugin lint test check go-test go-build hooks changelog release-notes dist checksums
+.PHONY: install uninstall install-plugin uninstall-plugin lint test check go-test go-build package-test hooks changelog release-notes dist checksums
 
 install:
-	install -d "$(BINDIR)"
-	install -m 0755 $(TOOLS) "$(BINDIR)/"
+	$(MAKE) install-plugin
 
 uninstall:
-	cd bin && for t in docker-*; do rm -f "$(BINDIR)/$$t"; done
+	$(MAKE) uninstall-plugin
 
-# Symlink, not copy: the dispatcher resolves tools via its own real location,
-# so the link keeps a checkout's bin/ preferred over PATH.
+# Install the Go implementation as a nested Docker CLI plugin. No standalone
+# docker-extras-* launcher is installed.
 install-plugin:
+	mkdir -p build
+	go build -o build/docker-extras ./cmd/docker-extras
 	install -d "$(PLUGIN_DIR)"
-	ln -sf "$(abspath plugin/docker-extras)" "$(PLUGIN_DIR)/docker-$(PLUGIN_NAME)"
+	install -m 0755 build/docker-extras "$(PLUGIN_DIR)/docker-$(PLUGIN_NAME)"
 
 uninstall-plugin:
 	rm -f "$(PLUGIN_DIR)/docker-$(PLUGIN_NAME)"
@@ -28,12 +25,11 @@ lint:
 
 test:
 	bash tests/docker-extras-volume-seed-test.sh
-	bash tests/install-uninstall-test.sh
 
-check: lint go-test test
+check: lint go-test test package-test
 
-# Keep the Go plugin's tests and static analysis in the same required gate as
-# the Bash release path. The Go binary is not added to the release package here.
+# Keep Go tests and static analysis in the required gate; the released plugin
+# binary is built separately for each supported operating system/architecture.
 go-test:
 	go test ./...
 	go vet ./...
@@ -41,6 +37,9 @@ go-test:
 go-build:
 	mkdir -p build
 	go build -o build/docker-extras ./cmd/docker-extras
+
+package-test: checksums
+	bash tests/install-uninstall-test.sh dist
 
 # Both hook types on purpose: the commit-msg hook does not install with
 # the default stage (the wip/duo family learned this the hard way).
@@ -70,22 +69,21 @@ release-notes:
 		git-cliff --unreleased --tag "$(TAG)" --strip header --output dist/RELEASE_NOTES.md; \
 	fi
 
-# The release tarball: exactly what the installer needs, from HEAD, so an
-# uncommitted change can never leak into a release asset. The staged
-# plugin's VERSION is stamped from git describe at archive time — the tag,
-# on a release build — so no release commit has to carry it; a build
-# between tags stamps the describe suffix (-N-gSHA, -dirty) honestly.
-# The installer is copied here too, so `checksums` can own the whole
-# SHA256SUMS manifest.
+# Plugin-only release archives. The tag workflow builds the exact checked-out
+# commit; VERSION is embedded at archive build time rather than committed.
 dist:
 	rm -rf dist/stage
-	mkdir -p dist/stage
-	git archive --format=tar HEAD bin plugin LICENSE README.md | tar -x -C dist/stage
-	VER="$$(git describe --tags --match 'v[0-9]*' --always --dirty)"; \
-	sed -i -E "s/^VERSION=\"[^\"]*\"/VERSION=\"$${VER#v}\"/" dist/stage/plugin/docker-extras; \
-	grep -q "^VERSION=\"$${VER#v}\"$$" dist/stage/plugin/docker-extras || \
-		{ echo "error: could not stamp VERSION in the staged plugin" >&2; exit 1; }
-	tar -czf dist/docker-extras.tar.gz -C dist/stage .
+	mkdir -p dist/stage/plugin
+	VERSION="$$(git describe --tags --match 'v[0-9]*' --always --dirty)"; \
+	VERSION="$${VERSION#v}"; \
+	cp LICENSE dist/stage/LICENSE; \
+	for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+		os="$${target%/*}"; arch="$${target#*/}"; \
+		CGO_ENABLED=0 GOOS="$$os" GOARCH="$$arch" go build -trimpath \
+			-ldflags "-s -w -X main.version=$$VERSION" \
+			-o dist/stage/plugin/docker-extras ./cmd/docker-extras || exit 1; \
+		tar -czf "dist/docker-extras-$$os-$$arch.tar.gz" -C dist/stage plugin/docker-extras LICENSE || exit 1; \
+	done
 	rm -rf dist/stage
 	cp scripts/install.sh dist/docker-extras-install.sh
 	cp scripts/uninstall.sh dist/docker-extras-uninstall.sh
@@ -93,5 +91,13 @@ dist:
 # Explicit names, not a glob: dist/ also collects non-release files
 # (RELEASE_NOTES.md), and a glob would silently checksum whatever happens
 # to be there.
-checksums:
-	cd dist && sha256sum docker-extras.tar.gz docker-extras-install.sh docker-extras-uninstall.sh > SHA256SUMS
+checksums: dist
+	cd dist && \
+	files="docker-extras-linux-amd64.tar.gz docker-extras-linux-arm64.tar.gz docker-extras-darwin-amd64.tar.gz docker-extras-darwin-arm64.tar.gz docker-extras-install.sh docker-extras-uninstall.sh"; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		sha256sum $$files > SHA256SUMS; \
+	elif command -v shasum >/dev/null 2>&1; then \
+		shasum -a 256 $$files > SHA256SUMS; \
+	else \
+		echo "error: sha256sum or shasum is required" >&2; exit 1; \
+	fi

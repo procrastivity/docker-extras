@@ -34,9 +34,8 @@ jobs:
       - run: make check
         env:
           REQUIRE_DOCKER: "1"
-      # dist stamps the plugin VERSION from git describe (the tag, here)
-      # and copies the installer/uninstaller; checksums owns the whole
-      # SHA256SUMS.
+      # Builds four nested-plugin platform archives and copies the
+      # installer/uninstaller; checksums owns the whole SHA256SUMS.
       - name: Build release assets
         run: make dist checksums
       # The release body is the annotated tag's message — contrib/release
@@ -48,7 +47,10 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --notes-from-tag \
-            dist/docker-extras.tar.gz \
+            dist/docker-extras-linux-amd64.tar.gz \
+            dist/docker-extras-linux-arm64.tar.gz \
+            dist/docker-extras-darwin-amd64.tar.gz \
+            dist/docker-extras-darwin-arm64.tar.gz \
             dist/docker-extras-install.sh \
             dist/docker-extras-uninstall.sh \
             dist/SHA256SUMS

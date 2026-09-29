@@ -49,10 +49,18 @@ fi
 original_docker_config="${DOCKER_CONFIG:-$HOME/.docker}"
 original_docker_context="${DOCKER_CONTEXT-}"
 original_docker_host="${DOCKER_HOST-}"
-if [ -z "$original_docker_context" ] && [ -z "$original_docker_host" ]; then
+if [ -n "${BDS245_TEST_DOCKER_HOST:-}" ]; then
+  # Keep the default engine visible to Go's distinct-ID assertions while
+  # selecting the disposable alternate engine only for this shell harness.
+  original_docker_context=""
+  original_docker_host="$BDS245_TEST_DOCKER_HOST"
+  selected_daemon_id=$(DOCKER_HOST="$original_docker_host" docker info --format '{{.ID}}')
+elif [ -z "$original_docker_context" ] && [ -z "$original_docker_host" ]; then
   original_docker_context="$(docker context show)"
+  selected_daemon_id="$(docker info --format '{{.ID}}')"
+else
+  selected_daemon_id="$(docker info --format '{{.ID}}')"
 fi
-selected_daemon_id="$(docker info --format '{{.ID}}')"
 
 repo_root="$(git rev-parse --show-toplevel)"
 [ -f "$repo_root/go.mod" ] && [ -d "$repo_root/cmd/docker-extras" ] || {
@@ -380,32 +388,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# j. the currently shipped Bash binary still works before its release cutover
-
-say "step j: smoke-test the Bash executable still packaged by make dist"
-rc=0
-bash "$repo_root/bin/docker-extras-volume-seed" capture --from-volume "$src" \
-  --name legacy --data-dir "$D" --image alpine:latest --yes >/dev/null 2>&1 || rc=$?
-if [ "$rc" -eq 0 ] && [ -f "$D/legacy.tar" ] && [ -f "$D/legacy.meta" ]; then
-  ok "shipped Bash executable captured a seed archive and metadata"
-else
-  bad "shipped Bash capture failed (rc=$rc)"
-fi
-namevol legacy; legacy="$new_vol"
-rc=0
-bash "$repo_root/bin/docker-extras-volume-seed" restore --to-volume "$legacy" \
-  --name legacy --data-dir "$D" --allow-create --label "$owner_label" \
-  --expect-image alpine:latest --yes >/dev/null 2>&1 || rc=$?
-if [ "$rc" -eq 0 ] && owned_volume "$legacy" && [ "$(tree_digest "$src")" = "$(tree_digest "$legacy")" ]; then
-  ok "shipped Bash executable restored the exact source bytes"
-else
-  bad "shipped Bash restore failed or changed bytes (rc=$rc)"
-fi
-
 # ---------------------------------------------------------------------------
-# k. cleanup — asserted explicitly; the EXIT trap is the failure-path backstop
+# j. cleanup — asserted explicitly; the EXIT trap is the failure-path backstop
 
-say "step k: cleanup"
+say "step j: cleanup"
 for v in "${vols[@]}"; do
   if owned_volume "$v"; then
     docker volume rm -f "$v" >/dev/null 2>&1 || true
