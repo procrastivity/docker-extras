@@ -135,7 +135,7 @@ func newLeafCommand(name string) *cobra.Command {
 	if name == "capture" {
 		short = "capture a named volume to a seed archive"
 	} else {
-		short = "restore a volume seed (not implemented yet)"
+		short = "restore a volume seed into a named volume"
 	}
 	cmd := &cobra.Command{
 		Use:   name,
@@ -161,6 +161,7 @@ func newLeafCommand(name string) *cobra.Command {
 		flags.String("expect-image", "", "image required for the restored data")
 		flags.Bool("force", false, "override an unknown or mismatched image lock")
 		flags.Bool("no-verify", false, "skip the seed integrity gate")
+		cmd.RunE = runRestoreCommand
 	}
 	return cmd
 }

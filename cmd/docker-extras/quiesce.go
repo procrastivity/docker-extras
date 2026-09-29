@@ -73,9 +73,8 @@ var errQuiesceDeclined = errors.New("aborted (no changes made)")
 const runningVolumeFormat = `{{.Names}}{{"\t"}}{{.Label "com.docker.compose.project"}}`
 const composeServiceFormat = `{{.Label "com.docker.compose.service"}}`
 
-// quiesceVolume is called by capture only after volume/provenance validation;
+// quiesceVolume is called only after the caller's volume and safety gates;
 // its required bind-mount preflight runs before it surveys or stops any user.
-// Restore remains disconnected until its own safety checks are implemented.
 //
 // Successful report records retain the Bash TSV format:
 //

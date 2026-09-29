@@ -70,7 +70,7 @@ func TestNestedHelpAndPluginNameNormalization(t *testing.T) {
 	}
 }
 
-func TestCaptureRequiresVolumeAndRestoreStillRefusesWithoutCallingDocker(t *testing.T) {
+func TestCaptureAndRestoreRequireTheirVolumeBeforeCallingDocker(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "docker-called")
 	bin := t.TempDir()
 	docker := filepath.Join(bin, "docker")
@@ -91,9 +91,9 @@ func TestCaptureRequiresVolumeAndRestoreStillRefusesWithoutCallingDocker(t *test
 				t.Fatalf("capture stderr = %q", stderr.String())
 			}
 		} else {
-			var commandErr *commandError
-			if !errors.As(err, &commandErr) || !strings.Contains(stderr.String(), "not implemented yet") {
-				t.Fatalf("restore error=%v stderr=%q, want refusing commandError", err, stderr.String())
+			var exitErr *commandExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 1 || !strings.Contains(stderr.String(), "restore requires --to-volume") {
+				t.Fatalf("restore error=%v stderr=%q, want required-volume preflight exit 1", err, stderr.String())
 			}
 		}
 		if stdout.Len() != 0 {
