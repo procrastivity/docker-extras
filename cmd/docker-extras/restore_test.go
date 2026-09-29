@@ -198,6 +198,69 @@ func TestRestoreNoVerifyStillEnforcesImageLockAndForceIsNarrow(t *testing.T) {
 	})
 }
 
+func TestRestoreUnknownImageLockRequiresExplicitOverride(t *testing.T) {
+	t.Run("unknown target image refuses without changing target", func(t *testing.T) {
+		log, state, target := installRestoreFakeDocker(t)
+		t.Setenv("FAKE_TARGET_IMAGE", "")
+		t.Setenv("FAKE_RUNNING_USERS", "plain\t\n")
+		dataDir := t.TempDir()
+		writeValidRestoreSeed(t, dataDir)
+		options := restoreTestOptions(dataDir, "", io.Discard)
+		options.NoVerify = true
+		err := restoreVolumeSeed(context.Background(), options)
+		if err == nil || restoreExitCode(err) != 1 || !strings.Contains(err.Error(), "cannot determine which image") {
+			t.Fatalf("unknown target image error=%v exit=%d, want image-lock refusal", err, restoreExitCode(err))
+		}
+		assertRestoreNoSurveyOrStops(t, string(mustReadFile(t, log)))
+		if got := string(mustReadFile(t, state)); got != "present\n" {
+			t.Fatalf("target volume state=%q, want present", got)
+		}
+		if got := string(mustReadFile(t, target)); got != "old\n" {
+			t.Fatalf("target contents=%q, want unchanged old contents", got)
+		}
+	})
+
+	t.Run("unknown seed image refuses without changing target", func(t *testing.T) {
+		log, state, target := installRestoreFakeDocker(t)
+		dataDir := t.TempDir()
+		archive := createRestoreTar(t, "seed with unknown image")
+		metadata := fmt.Sprintf("source_volume=source\nbytes=%d\nsha256=%s\n", len(archive), seedDigest(archive))
+		writeRestoreSeed(t, dataDir, "seed", archive, metadata, nil)
+		options := restoreTestOptions(dataDir, "", io.Discard)
+		options.NoVerify = true
+		err := restoreVolumeSeed(context.Background(), options)
+		if err == nil || restoreExitCode(err) != 1 || !strings.Contains(err.Error(), "seed records no image") {
+			t.Fatalf("unknown seed image error=%v exit=%d, want image-lock refusal", err, restoreExitCode(err))
+		}
+		assertRestoreNoSurveyOrStops(t, string(mustReadFile(t, log)))
+		if got := string(mustReadFile(t, state)); got != "present\n" {
+			t.Fatalf("target volume state=%q, want present", got)
+		}
+		if got := string(mustReadFile(t, target)); got != "old\n" {
+			t.Fatalf("target contents=%q, want unchanged old contents", got)
+		}
+	})
+
+	t.Run("expect-image resolves unknown target", func(t *testing.T) {
+		log, _, target := installRestoreFakeDocker(t)
+		t.Setenv("FAKE_TARGET_IMAGE", "")
+		dataDir := t.TempDir()
+		writeValidRestoreSeed(t, dataDir)
+		options := restoreTestOptions(dataDir, "", io.Discard)
+		options.ExpectImage = "alpine:3.22"
+		options.Yes = true
+		if err := restoreVolumeSeed(context.Background(), options); err != nil {
+			t.Fatalf("restore with explicit --expect-image: %v", err)
+		}
+		if strings.Contains(string(mustReadFile(t, log)), "{{.Image}}") {
+			t.Fatal("restore ignored --expect-image and attempted implicit image inference")
+		}
+		if got := string(mustReadFile(t, target)); got != "restored\n" {
+			t.Fatalf("target contents=%q, want restored", got)
+		}
+	})
+}
+
 func TestRestoreNoVerifyRefusesArchiveMissingOnSelectedDaemonBeforeSurvey(t *testing.T) {
 	log, _, _ := installRestoreFakeDocker(t)
 	t.Setenv("FAKE_REMOTE_ARCHIVE_MISSING", "true")
@@ -301,7 +364,7 @@ func TestRestoreAcceptsEmptyLabelValueAndRejectsEmptyKey(t *testing.T) {
 }
 
 func TestRestorePreflightRefusalPrecedesSurveyAndCleansProbes(t *testing.T) {
-	log, _, _ := installRestoreFakeDocker(t)
+	log, state, target := installRestoreFakeDocker(t)
 	t.Setenv("FAKE_BIND_FAIL", "true")
 	t.Setenv("FAKE_RUNNING_USERS", "plain\t\n")
 	dataDir := t.TempDir()
@@ -318,6 +381,12 @@ func TestRestorePreflightRefusalPrecedesSurveyAndCleansProbes(t *testing.T) {
 	}
 	if got := string(mustReadFile(t, report)); got != "" {
 		t.Fatalf("preflight failure report=%q, want empty", got)
+	}
+	if got := string(mustReadFile(t, state)); got != "present\n" {
+		t.Fatalf("preflight refusal target volume state=%q, want unchanged present volume", got)
+	}
+	if got := string(mustReadFile(t, target)); got != "old\n" {
+		t.Fatalf("preflight refusal target contents=%q, want unchanged old contents", got)
 	}
 	assertNoBindProbeArtifacts(t, dataDir)
 	calls := string(mustReadFile(t, log))

@@ -303,6 +303,25 @@ exit 93
 
 func TestQuiesceDaemonBackedComposeDown(t *testing.T) {
 	requireDockerDaemon(t)
+	defaultID, err := runDockerCommandOutput(t, "info", "--format", "{{.ID}}")
+	if err != nil {
+		t.Fatalf("inspect default test daemon ID: %v", err)
+	}
+	configuredEndpoint := os.Getenv("BDS245_TEST_DOCKER_HOST")
+	config, selectedContext := createTestDockerContext(t, configuredEndpoint)
+	t.Setenv("DOCKER_CONFIG", config)
+	t.Setenv("DOCKER_CONTEXT", selectedContext)
+	selectedID, err := runDockerCommandOutput(t, "info", "--format", "{{.ID}}")
+	if err != nil {
+		t.Fatalf("inspect selected test daemon ID: %v", err)
+	}
+	if configuredEndpoint != "" && strings.TrimSpace(defaultID) == strings.TrimSpace(selectedID) {
+		t.Fatalf("configured alternate Docker endpoint %q resolved to default daemon ID %s", configuredEndpoint, strings.TrimSpace(defaultID))
+	}
+	if configuredEndpoint == "" && strings.TrimSpace(defaultID) != strings.TrimSpace(selectedID) {
+		t.Fatalf("selected test context daemon ID %q differs from default endpoint %q", strings.TrimSpace(selectedID), strings.TrimSpace(defaultID))
+	}
+	t.Logf("Compose quiesce selected context %q resolved to daemon ID %s (default ID %s; alternate endpoint configured=%t)", selectedContext, strings.TrimSpace(selectedID), strings.TrimSpace(defaultID), configuredEndpoint != "")
 	project := uniqueDockerName("bds245compose")
 	volume := project + "-seed"
 	composeFile := filepath.Join(t.TempDir(), "compose.yaml")
@@ -371,6 +390,25 @@ volumes:
 
 func TestQuiesceDaemonBackedDirectStopPreservesContainer(t *testing.T) {
 	requireDockerDaemon(t)
+	defaultID, err := runDockerCommandOutput(t, "info", "--format", "{{.ID}}")
+	if err != nil {
+		t.Fatalf("inspect default test daemon ID: %v", err)
+	}
+	configuredEndpoint := os.Getenv("BDS245_TEST_DOCKER_HOST")
+	config, selectedContext := createTestDockerContext(t, configuredEndpoint)
+	t.Setenv("DOCKER_CONFIG", config)
+	t.Setenv("DOCKER_CONTEXT", selectedContext)
+	selectedID, err := runDockerCommandOutput(t, "info", "--format", "{{.ID}}")
+	if err != nil {
+		t.Fatalf("inspect selected test daemon ID: %v", err)
+	}
+	if configuredEndpoint != "" && strings.TrimSpace(defaultID) == strings.TrimSpace(selectedID) {
+		t.Fatalf("configured alternate Docker endpoint %q resolved to default daemon ID %s", configuredEndpoint, strings.TrimSpace(defaultID))
+	}
+	if configuredEndpoint == "" && strings.TrimSpace(defaultID) != strings.TrimSpace(selectedID) {
+		t.Fatalf("selected test context daemon ID %q differs from default endpoint %q", strings.TrimSpace(selectedID), strings.TrimSpace(defaultID))
+	}
+	t.Logf("direct-stop selected context %q resolved to daemon ID %s (default ID %s; alternate endpoint configured=%t)", selectedContext, strings.TrimSpace(selectedID), strings.TrimSpace(defaultID), configuredEndpoint != "")
 	name := uniqueDockerName("bds245direct")
 	volume := name + "-seed"
 	if dockerObjectExists(t, "container", name) || dockerObjectExists(t, "volume", volume) {

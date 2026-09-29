@@ -30,11 +30,13 @@ test:
 	bash tests/docker-extras-volume-seed-test.sh
 	bash tests/install-uninstall-test.sh
 
-check: lint test
+check: lint go-test test
 
-# The Go plugin scaffold is intentionally not part of the Bash release path yet.
+# Keep the Go plugin's tests and static analysis in the same required gate as
+# the Bash release path. The Go binary is not added to the release package here.
 go-test:
 	go test ./...
+	go vet ./...
 
 go-build:
 	mkdir -p build

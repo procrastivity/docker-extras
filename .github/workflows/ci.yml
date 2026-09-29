@@ -11,9 +11,12 @@ jobs:
     steps:
       # SHA-pinned (family C6.5); bump the SHA and the version comment together.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      # GitHub-hosted ubuntu runners ship a docker daemon; REQUIRE_DOCKER=1
-      # makes the harness's daemonless skip a failure here, so CI can never
-      # pass having tested nothing.
+      # SHA-pinned: use go.mod's toolchain directive for the Go half of make check.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      # GitHub-hosted ubuntu runners ship Docker; REQUIRE_DOCKER=1 makes
+      # daemonless integration skips fail in both Go and Bash tests.
       - run: make check
         env:
           REQUIRE_DOCKER: "1"

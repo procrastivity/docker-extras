@@ -72,9 +72,9 @@ checkout's `bin/` and falls back to PATH.
 ```sh
 make hooks                   # pre-commit + commit-msg hooks (Conventional Commits)
 make lint                    # shellcheck on bin/, plugin/, contrib/, scripts/, tests/
-make test                    # regression harness (needs a docker daemon; skips without one)
-make check                   # lint + test, the release gate
-go test ./...                # test the experimental Go CLI scaffold
+make test                    # Go plugin Docker regression + installer checks
+make go-test                 # Go tests (including daemon tests) + go vet
+make check                   # lint + Go checks + Docker integration, the CI/release gate
 make go-build                # build it to build/docker-extras (not yet released)
 ```
 

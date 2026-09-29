@@ -20,13 +20,17 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+      # SHA-pinned: use go.mod's toolchain directive for the Go half of make check.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
       # On a tag-push trigger, checkout recreates the tag ref from the
       # peeled commit SHA, so the local tag loses its annotation and
       # --notes-from-tag would fall back to the commit message
       # (actions/checkout#290). Re-fetch to restore the annotated object.
       - run: git fetch --tags --force
-      # REQUIRE_DOCKER=1: the daemonless test skip is a failure here — the
-      # release gate must actually test.
+      # REQUIRE_DOCKER=1: Docker integration skips fail in both Go and Bash;
+      # the tagged commit must earn the full parity gate before asset creation.
       - run: make check
         env:
           REQUIRE_DOCKER: "1"

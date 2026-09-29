@@ -12,13 +12,10 @@
 # daemonless machine is not a failure. CI runs it on a GitHub-hosted runner,
 # which provides a daemon.
 #
-# Safety: every docker object this harness creates is named
-# dvsprobe-<purpose>-$$, so it can never collide with a real volume. Each
-# created name is recorded the moment it is reserved, and only those exact
-# names are removed at the end — this never runs `docker volume ls` or sweeps
-# anything it did not create, and it never runs `docker compose`. The seed
-# directory is its own mktemp -d. Cleanup runs from an EXIT trap, so a failed
-# assertion still removes everything.
+# Safety: every volume gets an unpredictable dvsprobe-<purpose>-<run-token>
+# name, is refused if already present, and is removed only when its run-owner
+# label matches. This never sweeps other Docker objects or runs compose. The
+# seed directory is its own mktemp -d; cleanup also runs on assertion failure.
 #
 # It builds the working-tree Go CLI plugin into this test's temporary Docker
 # config and invokes every seed operation through `docker extras`.
@@ -46,6 +43,17 @@ if ! command -v docker >/dev/null 2>&1 \
   exit 0
 fi
 
+# Resolve the active endpoint before isolating Docker's config for plugin
+# discovery. Named contexts live under DOCKER_CONFIG, so retain their context
+# store by reference and prove the isolated config reaches the same daemon.
+original_docker_config="${DOCKER_CONFIG:-$HOME/.docker}"
+original_docker_context="${DOCKER_CONTEXT-}"
+original_docker_host="${DOCKER_HOST-}"
+if [ -z "$original_docker_context" ] && [ -z "$original_docker_host" ]; then
+  original_docker_context="$(docker context show)"
+fi
+selected_daemon_id="$(docker info --format '{{.ID}}')"
+
 repo_root="$(git rev-parse --show-toplevel)"
 [ -f "$repo_root/go.mod" ] && [ -d "$repo_root/cmd/docker-extras" ] || {
   say "error: Go CLI source not found under $repo_root"
@@ -53,12 +61,21 @@ repo_root="$(git rev-parse --show-toplevel)"
 }
 
 D="$(mktemp -d)"
+run_token="${D##*/}"
+run_token="${run_token#tmp.}"
+owner_label="com.procrastivity.docker-extras.test-run=$run_token"
 vols=()
+
+owned_volume() {
+  [ "$(docker volume inspect --format '{{ index .Labels "com.procrastivity.docker-extras.test-run" }}' "$1" 2>/dev/null)" = "$run_token" ]
+}
 
 cleanup() {
   local v
   for v in "${vols[@]}"; do
-    docker volume rm -f "$v" >/dev/null 2>&1 || true
+    if owned_volume "$v"; then
+      docker volume rm -f "$v" >/dev/null 2>&1 || true
+    fi
   done
   rm -rf "$D"
 }
@@ -68,24 +85,52 @@ trap cleanup EXIT
 # isolated to this fixture and leave the user's Docker CLI config untouched.
 export DOCKER_CONFIG="$D/docker-config"
 mkdir -p "$DOCKER_CONFIG/cli-plugins"
+if [ -n "$original_docker_context" ]; then
+  if [ "$original_docker_context" != default ]; then
+    context_store="$original_docker_config/contexts"
+    [ -d "$context_store" ] || {
+      say "error: selected context '$original_docker_context' is missing from $context_store"
+      exit 1
+    }
+    ln -s "$context_store" "$DOCKER_CONFIG/contexts"
+  fi
+  export DOCKER_CONTEXT="$original_docker_context"
+  unset DOCKER_HOST
+else
+  unset DOCKER_CONTEXT
+  export DOCKER_HOST="$original_docker_host"
+fi
+isolated_daemon_id="$(docker info --format '{{.ID}}')"
+if [ "$isolated_daemon_id" != "$selected_daemon_id" ]; then
+  say "error: isolated plugin config changed Docker daemon (before=$selected_daemon_id after=$isolated_daemon_id)"
+  exit 1
+fi
+say "isolated plugin config preserved selected Docker daemon $selected_daemon_id"
 plugin="$DOCKER_CONFIG/cli-plugins/docker-extras"
 go -C "$repo_root" build -o "$plugin" ./cmd/docker-extras
 run_seed() { docker extras volume seed "$@"; }
 
-# Reserve dvsprobe-PURPOSE-$$ and record it for cleanup, into $new_vol — a
-# global instead of a return-by-echo, because the vols+=() append has to land
-# in THIS shell, not a command-substitution subshell.
+# Reserve an absent name before any operation can create it. Cleanup checks
+# the owner label even for an attempted --allow-create that did not succeed.
+# $new_vol is global so vols+=() stays in this shell.
 new_vol=""
-mkvol() {
-  new_vol="dvsprobe-$1-$$"
+reserve_vol() {
+  new_vol="dvsprobe-$1-$run_token"
+  if docker volume inspect "$new_vol" >/dev/null 2>&1; then
+    say "refusing pre-existing volume $new_vol"
+    exit 1
+  fi
   vols+=("$new_vol")
-  docker volume create "$new_vol" >/dev/null
+}
+mkvol() {
+  reserve_vol "$1"
+  docker volume create --label "$owner_label" "$new_vol" >/dev/null
+  owned_volume "$new_vol" || { say "created volume $new_vol is not owned by this run"; exit 1; }
 }
 # Same, but does not create the volume yet — for the --allow-create cases,
 # where the plugin itself is the thing that creates it.
 namevol() {
-  new_vol="dvsprobe-$1-$$"
-  vols+=("$new_vol")
+  reserve_vol "$1"
 }
 
 meta_value() { sed -n "s/^$1=//p" "$2" 2>/dev/null | head -n1; }
@@ -93,11 +138,13 @@ meta_value() { sed -n "s/^$1=//p" "$2" 2>/dev/null | head -n1; }
 # One "sha256  path" line per regular file in VOL, sorted — the round-trip and
 # post-restore comparisons both reduce to a text diff of two of these.
 tree_digest() {
+  owned_volume "$1" || { say "refusing to mount missing or unowned volume $1"; return 1; }
   docker run --rm -v "$1":/v:ro alpine \
     sh -c 'cd /v && find . -type f -exec sha256sum {} \;' | sort
 }
 
 plant_marker() {  # plant_marker VOL — a file a wrongly-cleared volume can't keep
+  owned_volume "$1" || { say "refusing to mount missing or unowned volume $1"; return 1; }
   docker run --rm -v "$1":/v alpine sh -c '
     set -e
     mkdir -p /v/precious
@@ -106,7 +153,8 @@ plant_marker() {  # plant_marker VOL — a file a wrongly-cleared volume can't k
   ' >/dev/null
 }
 
-marker_of() {  # marker_of VOL — empty if missing or the volume was cleared
+marker_of() {  # marker_of VOL — empty if cleared; refuses missing/unowned volumes
+  owned_volume "$1" || { say "refusing to mount missing or unowned volume $1"; return 1; }
   docker run --rm -v "$1":/v:ro alpine cat /v/marker.txt 2>/dev/null || true
 }
 
@@ -162,7 +210,7 @@ say "step c: restore the good seed into a fresh volume"
 namevol dst; dst="$new_vol"
 rc=0
 run_seed restore --to-volume "$dst" --name probe --data-dir "$D" \
-  --allow-create --expect-image alpine:latest --yes >/dev/null 2>&1 || rc=$?
+  --allow-create --label "$owner_label" --expect-image alpine:latest --yes >/dev/null 2>&1 || rc=$?
 if [ "$rc" -eq 0 ]; then
   ok "restore into a fresh volume exited 0"
 else
@@ -240,25 +288,132 @@ fi
 say "step g: --no-verify lets the same corrupt seed through the gate"
 namevol nv; nv="$new_vol"
 rc=0
-run_seed restore --to-volume "$nv" --name probe3 --data-dir "$D" \
-  --allow-create --no-verify --expect-image alpine:latest --yes \
-  >/dev/null 2>&1 || rc=$?
-if [ "$rc" -ne 1 ]; then
-  ok "--no-verify proceeds past the integrity gate (rc=$rc, not the exit-1 refusal)"
+output="$(run_seed restore --to-volume "$nv" --name probe3 --data-dir "$D" \
+  --allow-create --label "$owner_label" --no-verify --expect-image alpine:latest --yes 2>&1)" || rc=$?
+if [ "$rc" -eq 2 ] && [[ "$output" == *"tar extract"* ]] && owned_volume "$nv"; then
+  ok "--no-verify reached tar extract, created the target, and returned exit 2"
 else
-  bad "--no-verify still refused with exit 1 — the gate is not actually skippable"
+  bad "--no-verify did not reach the expected extract failure and owned target (rc=$rc): $output"
 fi
 
 # ---------------------------------------------------------------------------
-# h. cleanup — asserted explicitly; the EXIT trap is the failure-path backstop
+# h. image identity is independent of integrity verification
 
-say "step h: cleanup"
+say "step h: unknown and mismatched image locks preserve the target"
+mkvol image-lock; image_lock="$new_vol"
+plant_marker "$image_lock"
+
+rc=0
+output="$(run_seed restore --to-volume "$image_lock" --name probe --data-dir "$D" \
+  --yes 2>&1)" || rc=$?
+if [ "$rc" -eq 1 ] && [[ "$output" == *"cannot determine which image"* ]]; then
+  ok "an unknown target image is refused before replacement"
+else
+  bad "unknown target image returned rc=$rc without the expected refusal: $output"
+fi
+if [ "$(marker_of "$image_lock")" = "DO-NOT-LOSE-ME" ]; then
+  ok "the target's prior data survived the unknown-image refusal"
+else
+  bad "unknown-image refusal changed the target"
+fi
+
+rc=0
+output="$(run_seed restore --to-volume "$image_lock" --name probe --data-dir "$D" \
+  --expect-image alpine:3.22 --no-verify --yes 2>&1)" || rc=$?
+if [ "$rc" -eq 1 ] && [[ "$output" == *"seed was captured under image"* ]]; then
+  ok "--no-verify does not bypass a mismatched image lock"
+else
+  bad "mismatched image with --no-verify returned rc=$rc without the expected refusal: $output"
+fi
+if [ "$(marker_of "$image_lock")" = "DO-NOT-LOSE-ME" ]; then
+  ok "the target's prior data survived the mismatched-image refusal"
+else
+  bad "mismatched-image refusal changed the target"
+fi
+
+rc=0
+run_seed restore --to-volume "$image_lock" --name probe --data-dir "$D" \
+  --expect-image alpine:3.22 --force --no-verify --yes >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && [ "$(tree_digest "$src")" = "$(tree_digest "$image_lock")" ]; then
+  ok "--force bypassed only the mismatched image lock and restored the expected bytes"
+else
+  bad "forced mismatched-image restore failed or produced different bytes (rc=$rc)"
+fi
+
+# ---------------------------------------------------------------------------
+# i. creation is delayed until gates pass; failure after clear is exit 2
+
+say "step i: delayed creation and post-clear failure classification"
+namevol delayed; delayed="$new_vol"
+rc=0
+output="$(run_seed restore --to-volume "$delayed" --name probe --data-dir "$D" \
+  --allow-create --label "$owner_label" --expect-image alpine:3.22 --yes 2>&1)" || rc=$?
+if [ "$rc" -eq 1 ] && [[ "$output" == *"seed was captured under image"* ]] \
+  && ! docker volume inspect "$delayed" >/dev/null 2>&1; then
+  ok "image refusal left the delayed --allow-create target absent"
+else
+  bad "delayed create gate returned rc=$rc or created its target: $output"
+fi
+if tree_digest "$delayed" >/dev/null 2>&1 || marker_of "$delayed" >/dev/null 2>&1 \
+  || docker volume inspect "$delayed" >/dev/null 2>&1; then
+  bad "read helpers mounted or created the reserved target after pre-create refusal"
+else
+  ok "read helpers refused the absent target without creating a volume"
+fi
+
+printf 'not a tar archive\n' >"$D/partial.tar"
+printf 'image=alpine:latest\n' >"$D/partial.meta"
+mkvol clearfail; clearfail="$new_vol"
+plant_marker "$clearfail"
+rc=0
+output="$(run_seed restore --to-volume "$clearfail" --name partial --data-dir "$D" \
+  --expect-image alpine:latest --no-verify --yes 2>&1)" || rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "an extract failure after target clear returned exit 2"
+else
+  bad "post-clear extract failure returned rc=$rc instead of 2: $output"
+fi
+if [ -z "$(marker_of "$clearfail")" ]; then
+  ok "post-clear failure did not falsely claim the old target was intact"
+else
+  bad "post-clear failure left the old marker, contrary to the simulated clear"
+fi
+
+# ---------------------------------------------------------------------------
+# j. the currently shipped Bash binary still works before its release cutover
+
+say "step j: smoke-test the Bash executable still packaged by make dist"
+rc=0
+bash "$repo_root/bin/docker-extras-volume-seed" capture --from-volume "$src" \
+  --name legacy --data-dir "$D" --image alpine:latest --yes >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$D/legacy.tar" ] && [ -f "$D/legacy.meta" ]; then
+  ok "shipped Bash executable captured a seed archive and metadata"
+else
+  bad "shipped Bash capture failed (rc=$rc)"
+fi
+namevol legacy; legacy="$new_vol"
+rc=0
+bash "$repo_root/bin/docker-extras-volume-seed" restore --to-volume "$legacy" \
+  --name legacy --data-dir "$D" --allow-create --label "$owner_label" \
+  --expect-image alpine:latest --yes >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && owned_volume "$legacy" && [ "$(tree_digest "$src")" = "$(tree_digest "$legacy")" ]; then
+  ok "shipped Bash executable restored the exact source bytes"
+else
+  bad "shipped Bash restore failed or changed bytes (rc=$rc)"
+fi
+
+# ---------------------------------------------------------------------------
+# k. cleanup — asserted explicitly; the EXIT trap is the failure-path backstop
+
+say "step k: cleanup"
 for v in "${vols[@]}"; do
-  docker volume rm -f "$v" >/dev/null 2>&1 || true
+  if owned_volume "$v"; then
+    docker volume rm -f "$v" >/dev/null 2>&1 || true
+  fi
   if docker volume inspect "$v" >/dev/null 2>&1; then
-    bad "volume $v was not removed"
+    bad "volume $v remains (not owned or removal failed)"
   else
-    ok "volume $v removed"
+    ok "reserved volume $v is absent"
   fi
 done
 rm -rf "$D"
