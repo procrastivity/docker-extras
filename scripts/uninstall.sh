@@ -20,8 +20,9 @@ check_directory_chain() {
 }
 check_directory_chain "$STATE_DIR"
 
-[ -f "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ] ||
+if [ ! -f "$STATE_FILE" ] || [ -L "$STATE_FILE" ]; then
   die "no regular install record found at $STATE_FILE; refusing to guess what to remove"
+fi
 command -v awk >/dev/null 2>&1 || die "awk is required"
 command -v mktemp >/dev/null 2>&1 || die "mktemp is required"
 
@@ -83,14 +84,16 @@ while IFS='|' read -r path expected; do
   case "$path" in
     "$install_dir"/docker-extras-*)
       base=${path##*/}
-      [ "$path" = "$install_dir/$base" ] && [ "$base" != docker-extras- ] ||
+      if [ "$path" != "$install_dir/$base" ] || [ "$base" = docker-extras- ]; then
         die "refusing path outside the recorded tool directory: $path"
+      fi
       ;;
     "$plugin_path") [ -n "$plugin_path" ] || die "malformed plugin entry in $STATE_FILE" ;;
     *) die "refusing path outside the recorded installation: $path" ;;
   esac
-  [ -f "$path" ] && [ ! -L "$path" ] ||
+  if [ ! -f "$path" ] || [ -L "$path" ]; then
     die "refusing missing, non-regular, or symlinked file: $path"
+  fi
   actual=$(hash_file "$path") || die "could not hash installed file: $path"
   [ "$actual" = "$expected" ] || die "refusing modified file: $path"
 done < "$files"

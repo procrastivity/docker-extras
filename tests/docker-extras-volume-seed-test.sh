@@ -63,10 +63,10 @@ else
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-[ -f "$repo_root/go.mod" ] && [ -d "$repo_root/cmd/docker-extras" ] || {
+if [ ! -f "$repo_root/go.mod" ] || [ ! -d "$repo_root/cmd/docker-extras" ]; then
   say "error: Go CLI source not found under $repo_root"
   exit 1
-}
+fi
 
 D="$(mktemp -d)"
 run_token="${D##*/}"

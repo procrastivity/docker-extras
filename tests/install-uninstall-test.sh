@@ -5,7 +5,11 @@ set -euo pipefail
 say() { printf 'install-uninstall-test: %s\n' "$*" >&2; }
 fail() { say "FAIL: $*"; exit 1; }
 require_file() { [ -f "$1" ] || fail "missing file: $1"; }
-require_absent() { [ ! -e "$1" ] && [ ! -L "$1" ] || fail "still present: $1"; }
+require_absent() {
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    fail "still present: $1"
+  fi
+}
 if command -v sha256sum >/dev/null 2>&1; then
   sha() { sha256sum "$1" | awk '{print $1}'; }
   sha_stdin() { sha256sum; }

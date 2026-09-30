@@ -113,8 +113,9 @@ awk '
   END { if (plugin != 1 || license != 1) exit 1 }
 ' "$tmp/members" || die "$asset must contain only plugin/docker-extras and LICENSE"
 tar -xzf "$tmp/$asset" -C "$tmp" plugin/docker-extras || die "could not extract plugin from $asset"
-[ -f "$tmp/plugin/docker-extras" ] && [ ! -L "$tmp/plugin/docker-extras" ] ||
+if [ ! -f "$tmp/plugin/docker-extras" ] || [ -L "$tmp/plugin/docker-extras" ]; then
   die "$asset has no regular plugin/docker-extras executable"
+fi
 
 # Audit the complete v1 Bash install record before any destination or state
 # write. In particular, a changed legacy launcher blocks migration as a whole.
@@ -124,8 +125,9 @@ old_plugin_name=""
 old_plugin_path=""
 have_old_state=0
 if [ -e "$STATE_FILE" ] || [ -L "$STATE_FILE" ]; then
-  [ -f "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ] ||
+  if [ ! -f "$STATE_FILE" ] || [ -L "$STATE_FILE" ]; then
     die "refusing malformed or symlinked install record $STATE_FILE"
+  fi
   awk -F '|' '
     $1 == "version" { if (NF != 2 || $2 != "1" || version++) exit 1; next }
     $1 == "install_dir" { if (NF != 2 || $2 == "" || install++) exit 1; next }
@@ -169,16 +171,18 @@ if [ -e "$STATE_FILE" ] || [ -L "$STATE_FILE" ]; then
     case "$old_path" in
       "$old_install_dir"/docker-extras-*)
         old_base=${old_path##*/}
-        [ "$old_path" = "$old_install_dir/$old_base" ] && [ "$old_base" != docker-extras- ] ||
+        if [ "$old_path" != "$old_install_dir/$old_base" ] || [ "$old_base" = docker-extras- ]; then
           die "legacy file path is outside the recorded tool directory: $old_path"
+        fi
         ;;
       "$old_plugin_path")
         [ -n "$old_plugin_path" ] || die "legacy record has an invalid plugin file entry"
         ;;
       *) die "legacy file path is outside the recorded installation: $old_path" ;;
     esac
-    [ -f "$old_path" ] && [ ! -L "$old_path" ] ||
+    if [ ! -f "$old_path" ] || [ -L "$old_path" ]; then
       die "refusing missing, non-regular, or symlinked legacy file: $old_path"
+    fi
     actual=$(hash_file "$old_path") || die "could not hash legacy file: $old_path"
     [ "$actual" = "$expected" ] || die "refusing modified legacy file: $old_path"
   done < "$tmp/old-files"
