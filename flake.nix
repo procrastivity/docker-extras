@@ -7,9 +7,8 @@
   };
 
   # Dev shell only — plain bash ships as source, so there is nothing to
-  # build. The shell pins the release/hygiene toolchain; CI stays on the
-  # ubuntu-latest host tools (shellcheck and a docker daemon are already
-  # there).
+  # build. The shell pins the release/hygiene toolchain; CI provisions Go
+  # from go.mod and uses ubuntu-latest host tools for shellcheck and Docker.
   outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
@@ -19,6 +18,7 @@
         devShells.default = pkgs.mkShell {
           name = "docker-extras";
           packages = with pkgs; [
+            go
             shellcheck
             git-cliff
             gh

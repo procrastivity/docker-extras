@@ -111,10 +111,10 @@ fi
 echo "Releasing ${CURRENT:-(no previous tag)} -> ${TAG} on branch ${BRANCH}"
 
 # --- Gate: the local twin of what CI verifies on the tag workflow ---
-# (make test self-skips without a docker daemon; the tag workflow runs it
-# on a runner that has one, with REQUIRE_DOCKER=1.)
+# Require the same Go and Docker daemon checks as CI; local release attempts
+# must not silently pass after integration tests skip.
 
-make check
+REQUIRE_DOCKER=1 make check
 
 # --- Generate the release notes (they become the tag message) ---
 
