@@ -70,6 +70,30 @@ func TestNestedHelpAndPluginNameNormalization(t *testing.T) {
 	}
 }
 
+// The installer puts the binary on PATH as docker-extras and links it into the
+// Docker plugin directory as docker-<name>; argv[0] alone selects the name.
+func TestExecutableNameSelectsPATHAndPluginCommand(t *testing.T) {
+	for _, tc := range []struct {
+		executable string
+		args       []string
+		wantUsage  string
+	}{
+		{"/home/u/.local/bin/docker-extras", []string{"volume", "seed", "capture", "--help"}, "docker-extras volume seed capture"},
+		{"/home/u/.docker/cli-plugins/docker-tools", []string{"tools", "volume", "seed", "capture", "--help"}, "docker-tools volume seed capture"},
+	} {
+		t.Run(tc.executable, func(t *testing.T) {
+			pluginName := pluginNameFromExecutable(tc.executable)
+			var stdout, stderr bytes.Buffer
+			if err := Execute(tc.args, &stdout, &stderr, "dev", pluginName); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if !strings.Contains(stdout.String(), tc.wantUsage) {
+				t.Fatalf("help output %q does not contain %q", stdout.String(), tc.wantUsage)
+			}
+		})
+	}
+}
+
 func TestCaptureAndRestoreRequireTheirVolumeBeforeCallingDocker(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "docker-called")
 	bin := t.TempDir()
