@@ -1,24 +1,42 @@
 PLUGIN_DIR ?= $(HOME)/.docker/cli-plugins
 PLUGIN_NAME ?= extras
+BIN_DIR ?= $(HOME)/.local/bin
+# Non-empty NO_PLUGIN installs only the PATH binary, like DOCKER_EXTRAS_NO_PLUGIN.
+NO_PLUGIN ?=
 
-.PHONY: install uninstall install-plugin uninstall-plugin lint test check go-test go-build package-test hooks changelog release-notes dist checksums
+.PHONY: install uninstall install-bin uninstall-bin install-plugin uninstall-plugin lint test check go-test go-build package-test hooks changelog release-notes dist checksums
 
-install:
-	$(MAKE) install-plugin
+# Install docker-extras into BIN_DIR (meant for PATH) and, unless NO_PLUGIN is
+# set, link it into PLUGIN_DIR as the nested Docker CLI plugin. Docker runs a
+# plugin through the path it found, so the link name sets the Docker command.
+install: install-bin
+	@if [ -z "$(NO_PLUGIN)" ]; then $(MAKE) install-plugin; fi
 
-uninstall:
-	$(MAKE) uninstall-plugin
+uninstall: uninstall-plugin uninstall-bin
 
-# Install the Go implementation as a nested Docker CLI plugin. No standalone
-# docker-extras-* launcher is installed.
-install-plugin:
+install-bin:
 	mkdir -p build
 	go build -o build/docker-extras ./cmd/docker-extras
-	install -d "$(PLUGIN_DIR)"
-	install -m 0755 build/docker-extras "$(PLUGIN_DIR)/docker-$(PLUGIN_NAME)"
+	install -d "$(BIN_DIR)"
+	install -m 0755 build/docker-extras "$(BIN_DIR)/docker-extras"
 
+uninstall-bin:
+	rm -f "$(BIN_DIR)/docker-extras"
+
+# The plugin is a symlink to the PATH binary; install-bin must run first.
+install-plugin:
+	test -x "$(BIN_DIR)/docker-extras"
+	install -d "$(PLUGIN_DIR)"
+	ln -sfn "$(BIN_DIR)/docker-extras" "$(PLUGIN_DIR)/docker-$(PLUGIN_NAME)"
+
+# Remove the plugin only while it is still this checkout's link.
 uninstall-plugin:
-	rm -f "$(PLUGIN_DIR)/docker-$(PLUGIN_NAME)"
+	@link="$(PLUGIN_DIR)/docker-$(PLUGIN_NAME)"; \
+	if [ -L "$$link" ] && [ "$$(readlink "$$link")" = "$(BIN_DIR)/docker-extras" ]; then \
+		rm -f "$$link"; \
+	elif [ -e "$$link" ] || [ -L "$$link" ]; then \
+		echo "leaving $$link: it is not a link to $(BIN_DIR)/docker-extras" >&2; \
+	fi
 
 lint:
 	shellcheck .agents/setup .agents/resume .agents/update-wip bin/docker-* plugin/docker-extras tests/*.sh contrib/release contrib/check-commit-msg scripts/install.sh scripts/uninstall.sh
@@ -69,8 +87,10 @@ release-notes:
 		git-cliff --unreleased --tag "$(TAG)" --strip header --output dist/RELEASE_NOTES.md; \
 	fi
 
-# Plugin-only release archives. The tag workflow builds the exact checked-out
-# commit; VERSION is embedded at archive build time rather than committed.
+# Release archives hold the one binary at its historical plugin/docker-extras
+# path, so every installer can read every release's archive. The tag workflow
+# builds the exact checked-out commit; VERSION is embedded at archive build
+# time rather than committed.
 dist:
 	rm -rf dist/stage
 	mkdir -p dist/stage/plugin

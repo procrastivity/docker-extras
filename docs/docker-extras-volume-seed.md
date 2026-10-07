@@ -15,6 +15,8 @@ docker extras volume seed restore --to-volume VOL [--name NAME] [--data-dir DIR]
 ```
 
 `--help` carries the full option reference; this page explains the design.
+The same commands also run directly from `PATH` as
+`docker-extras volume seed capture|restore ...`.
 
 Both commands need the Docker CLI and a reachable Docker Engine daemon. The
 daemon must be able to read and write the client-side `--data-dir` through a
