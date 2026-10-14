@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -70,6 +71,10 @@ func TestCaptureWritesArchiveMetadataAndQuiesceReportOnSelectedCLIContext(t *tes
 	}
 	if !strings.Contains(stderr.String(), "compose project 'alpha' was taken down") || !strings.Contains(stderr.String(), "'docker start plain'") {
 		t.Fatalf("successful quiesce recovery guidance missing: %q", stderr.String())
+	}
+	assertOutputOrder(t, stderr.String(), "archiving volume", "hashing archive ", "SHA-256 computed for ", "done →")
+	if !strings.Contains(stderr.String(), fmt.Sprintf("hashing archive %s/fake-seed.tar.tmp (%d bytes)", dataDir, len(payload))) {
+		t.Fatalf("capture hash notice omitted archive path/size: %q", stderr.String())
 	}
 
 	archive := filepath.Join(dataDir, "fake-seed.tar")
@@ -319,6 +324,87 @@ func TestCaptureArchiveFailureKeepsRecoveryGuidanceAndCleansTemps(t *testing.T) 
 	}
 }
 
+func TestCaptureHashNoticePrecedesBlockingHashAndKeepsChecksumOffStdout(t *testing.T) {
+	installCaptureFakeDocker(t)
+	t.Setenv("FAKE_CAPTURE_NO_USERS", "1")
+	t.Setenv("FAKE_CAPTURE_NAME", "progress-seed")
+	payload := "controlled hash payload\n"
+	t.Setenv("FAKE_CAPTURE_PAYLOAD", payload)
+	gateDir := t.TempDir()
+	t.Setenv("FAKE_DOCKER_GATE_DIR", gateDir)
+	dataDir := t.TempDir()
+	stdout := &synchronizedProgressBuffer{}
+	stderr := newSynchronizedProgressBuffer("hashing archive ")
+	result := make(chan error, 1)
+	go func() {
+		result <- captureVolumeSeed(context.Background(), captureOptions{
+			Volume: "capture-volume", Name: "progress-seed", DataDir: dataDir,
+			Yes: true, Stdout: stdout, Stderr: stderr,
+		})
+	}()
+	defer func() { _ = os.WriteFile(filepath.Join(gateDir, "release"), nil, 0o600) }()
+
+	select {
+	case <-stderr.noticed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("capture hash notice was not emitted")
+	}
+	waitForFakeDockerGate(t, gateDir)
+	select {
+	case err := <-result:
+		t.Fatalf("capture completed while fake sha256sum was blocked: %v", err)
+	default:
+	}
+	archiveTmp := filepath.Join(dataDir, "progress-seed.tar.tmp")
+	if !strings.Contains(stderr.String(), fmt.Sprintf("hashing archive %s (%d bytes)", archiveTmp, len(payload))) {
+		t.Fatalf("capture hash notice omitted exact temporary archive path/size: %q", stderr.String())
+	}
+	_ = os.WriteFile(filepath.Join(gateDir, "release"), nil, 0o600)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("capture failed after releasing hash gate: %v\nstderr=%s", err, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("capture did not finish after releasing hash gate")
+	}
+	assertOutputOrder(t, stderr.String(), "hashing archive ", "SHA-256 computed for ", "done →")
+	if got := stdout.String(); got != "" || strings.Contains(got, "sha256") {
+		t.Fatalf("internal checksum output contaminated caller stdout: %q", got)
+	}
+	if got := string(mustReadFile(t, filepath.Join(dataDir, "progress-seed.tar"))); got != payload {
+		t.Fatalf("published archive=%q, want %q", got, payload)
+	}
+	assertNoCaptureTemps(t, dataDir, "progress-seed")
+}
+
+func TestCaptureHashFailureDoesNotPublishArchiveOrSuccessNotice(t *testing.T) {
+	installCaptureFakeDocker(t)
+	t.Setenv("FAKE_CAPTURE_NO_USERS", "1")
+	t.Setenv("FAKE_CAPTURE_NAME", "hash-failure")
+	t.Setenv("FAKE_CAPTURE_PAYLOAD", "must stay temporary")
+	t.Setenv("FAKE_CAPTURE_HASH_FAIL", "1")
+	dataDir := t.TempDir()
+	var stderr bytes.Buffer
+	err := captureVolumeSeed(context.Background(), captureOptions{
+		Volume: "capture-volume", Name: "hash-failure", DataDir: dataDir, Yes: true, Stderr: &stderr,
+	})
+	if err == nil || !strings.Contains(err.Error(), "volume archive (tar) failed") {
+		t.Fatalf("capture error=%v, want checksum subprocess failure", err)
+	}
+	if !strings.Contains(stderr.String(), "hashing archive ") || strings.Contains(stderr.String(), "SHA-256 computed for ") || strings.Contains(stderr.String(), "done →") {
+		t.Fatalf("failed hash phase emitted missing start or false success: %q", stderr.String())
+	}
+	for _, path := range []string{
+		filepath.Join(dataDir, "hash-failure.tar"), filepath.Join(dataDir, "hash-failure.meta"),
+		filepath.Join(dataDir, "hash-failure.tar.tmp"), filepath.Join(dataDir, "hash-failure.meta.tmp"),
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("capture failure left publication/temp path %q: %v", path, err)
+		}
+	}
+}
+
 func TestCaptureDaemonBackedSelectedContextBindProbeComposeDownAndArchive(t *testing.T) {
 	requireDockerDaemon(t)
 	defaultID, err := runDockerCommandOutput(t, "info", "--format", "{{.ID}}")
@@ -346,7 +432,7 @@ func TestCaptureDaemonBackedSelectedContextBindProbeComposeDownAndArchive(t *tes
 	project := uniqueDockerName("bds245capture")
 	volume := project + "-data"
 	container := project + "-db-1"
-	dataDir := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "seed 'quoted' $(printf substituted) `printf expanded` $HOME")
 	report := filepath.Join(t.TempDir(), "report.tsv")
 	composeFile := filepath.Join(t.TempDir(), "compose.yaml")
 	compose := fmt.Sprintf(`services:
@@ -428,6 +514,10 @@ volumes:
 	if !strings.Contains(output, "Stopped") || !strings.Contains(output, "archiving volume "+volume) {
 		t.Fatalf("Docker plugin did not pass through Compose/archive output: %s", output)
 	}
+	if !strings.Contains(output, "hashing archive "+filepath.Join(dataDir, "daemon-seed.tar.tmp")) {
+		t.Fatalf("capture progress did not preserve the literal archive path: %s", output)
+	}
+	assertOutputOrder(t, output, "archiving volume ", "hashing archive ", "SHA-256 computed for ", "done →")
 	if !dockerObjectExists(t, "volume", volume) {
 		t.Fatalf("capture's Compose down removed volume %q", volume)
 	}
@@ -489,7 +579,12 @@ volumes:
 
 func installCaptureFakeDocker(t *testing.T) string {
 	t.Helper()
-	return installFakeDocker(t, `
+	log := installFakeDocker(t, `
+wait_for_hash_gate() {
+  [ -n "${FAKE_DOCKER_GATE_DIR-}" ] || return 0
+  : > "$FAKE_DOCKER_GATE_DIR/reached"
+  while [ ! -e "$FAKE_DOCKER_GATE_DIR/release" ]; do sleep 0.01; done
+}
 case "$1" in
   version)
     printf '29.0.0\n'
@@ -583,7 +678,15 @@ case "$1" in
         fi
         source=${6#*src=}
         source=${source%%,*}
-        printf '%s' "$FAKE_CAPTURE_PAYLOAD" > "$source/$FAKE_CAPTURE_NAME.tar.tmp"
+        archive="$source/$FAKE_CAPTURE_NAME.tar.tmp"
+        printf '%s' "$FAKE_CAPTURE_PAYLOAD" > "$archive"
+        bytes=$(wc -c < "$archive" | tr -d '[:space:]')
+        printf 'hashing archive %s (%s bytes)…\n' "$archive" "$bytes" >&2
+        if [ "${FAKE_CAPTURE_HASH_FAIL-unset}" = 1 ]; then
+          printf 'simulated sha256sum failure\n' >&2
+          exit 125
+        fi
+        wait_for_hash_gate
         sha256sum "$source/$FAKE_CAPTURE_NAME.tar.tmp"
         ;;
       *) exit 94 ;;
@@ -592,6 +695,71 @@ case "$1" in
   *) exit 95 ;;
 esac
 `)
+	t.Setenv("FAKE_DOCKER_GATE_DIR", "")
+	t.Setenv("FAKE_CAPTURE_HASH_FAIL", "0")
+	return log
+}
+
+type synchronizedProgressBuffer struct {
+	mu      sync.Mutex
+	buffer  bytes.Buffer
+	want    string
+	noticed chan struct{}
+	once    sync.Once
+}
+
+func newSynchronizedProgressBuffer(want string) *synchronizedProgressBuffer {
+	return &synchronizedProgressBuffer{want: want, noticed: make(chan struct{})}
+}
+
+func (b *synchronizedProgressBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	n, err := b.buffer.Write(p)
+	seen := b.want != "" && strings.Contains(b.buffer.String(), b.want)
+	b.mu.Unlock()
+	if seen {
+		b.once.Do(func() { close(b.noticed) })
+	}
+	return n, err
+}
+
+func (b *synchronizedProgressBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
+
+func waitForFakeDockerGate(t *testing.T, gateDir string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join(gateDir, "reached")); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("fake Docker did not reach blocking phase gate in %s", gateDir)
+}
+
+func assertOutputOrder(t *testing.T, output string, phrases ...string) {
+	t.Helper()
+	last := -1
+	for _, phrase := range phrases {
+		index := strings.Index(output, phrase)
+		if index < 0 || index <= last {
+			t.Fatalf("output phrase %q was missing or out of order in %q", phrase, output)
+		}
+		last = index
+	}
+}
+
+func assertNoCaptureTemps(t *testing.T, dataDir, name string) {
+	t.Helper()
+	for _, path := range []string{filepath.Join(dataDir, name+".tar.tmp"), filepath.Join(dataDir, name+".meta.tmp")} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("capture temporary file %q remains: %v", path, err)
+		}
+	}
 }
 
 func parseSeedMetadata(t *testing.T, contents []byte) map[string]string {

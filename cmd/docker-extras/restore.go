@@ -113,6 +113,7 @@ func restoreExitCode(err error) int {
 }
 
 func restoreVolumeSeed(ctx context.Context, options restoreOptions) error {
+	workflowStarted := time.Now()
 	if options.Stdout == nil {
 		options.Stdout = io.Discard
 	}
@@ -222,15 +223,20 @@ func restoreVolumeSeed(ctx context.Context, options restoreOptions) error {
 
 	if !options.NoVerify {
 		if legacy {
-			_, _ = fmt.Fprintf(options.Stderr, "note: %s predates the integrity fields — checking the tar header only\n", metaPath)
+			_, _ = fmt.Fprintf(options.Stderr, "checking legacy tar headers for %s (%d bytes)…\n", archive, archiveInfo.Size())
+			started := time.Now()
 			if err := validateRestoreTar(ctx, dockerEnv, dataDir, options.Name); err != nil {
 				return fmt.Errorf("seed is corrupt: %s (tar -tf failed): %w", archive, err)
 			}
+			_, _ = fmt.Fprintf(options.Stderr, "legacy tar headers valid for %s (%d bytes; validation took %s)\n",
+				archive, archiveInfo.Size(), time.Since(started).Round(time.Millisecond))
 		} else if metadataExists {
 			actualBytes := strconv.FormatInt(archiveInfo.Size(), 10)
 			if metadata.Bytes != actualBytes {
 				return fmt.Errorf("seed is truncated or damaged: %s holds %s bytes, the sidecar records %s", archive, actualBytes, metadata.Bytes)
 			}
+			_, _ = fmt.Fprintf(options.Stderr, "verifying archive %s (%d bytes) against metadata SHA-256…\n", archive, archiveInfo.Size())
+			started := time.Now()
 			got, err := restoreArchiveSHA256(ctx, dockerEnv, dataDir, options.Name, options.Stderr)
 			if err != nil {
 				return fmt.Errorf("could not compute the checksum of %s: %w", archive, err)
@@ -238,7 +244,11 @@ func restoreVolumeSeed(ctx context.Context, options restoreOptions) error {
 			if got != metadata.SHA256 {
 				return fmt.Errorf("seed checksum does not match: %s (sidecar records %s, file computes %s)", archive, metadata.SHA256, got)
 			}
+			_, _ = fmt.Fprintf(options.Stderr, "verified archive %s (%d bytes; SHA-256 matched in %s)\n",
+				archive, archiveInfo.Size(), time.Since(started).Round(time.Millisecond))
 		}
+	} else {
+		_, _ = fmt.Fprintf(options.Stderr, "integrity verification skipped for %s (%d bytes) (--no-verify)\n", archive, archiveInfo.Size())
 	}
 
 	volumeInfo, volumeExists, err := inspectRestoreVolume(ctx, dockerEnv, options.Volume)
@@ -317,8 +327,9 @@ func restoreVolumeSeed(ctx context.Context, options restoreOptions) error {
 	}
 
 	_, _ = fmt.Fprintf(options.Stderr, "restoring %s → %s\n", archive, options.Volume)
-	started := time.Now()
-	runErr := runRestoreContainer(ctx, dockerEnv, options.Stdout, options.Stderr, options.Volume, dataDir, options.Name)
+	extractStarted := time.Now()
+	extractProgress := &timedMarkerWriter{dst: options.Stderr, marker: "extracting archive "}
+	runErr := runRestoreContainer(ctx, dockerEnv, options.Stdout, extractProgress, options.Volume, dataDir, options.Name)
 	if runErr != nil {
 		message, changed := restoreRunFailureMessage(runErr, options.Volume)
 		if targetChanged || changed {
@@ -326,8 +337,13 @@ func restoreVolumeSeed(ctx context.Context, options restoreOptions) error {
 		}
 		return message
 	}
-	_, _ = fmt.Fprintf(options.Stderr, "done → %s restored from %s (%s)\n", options.Volume, archive, time.Since(started).Round(time.Second))
+	if !extractProgress.startedAt.IsZero() {
+		extractStarted = extractProgress.startedAt
+	}
+	_, _ = fmt.Fprintf(options.Stderr, "done → %s restored from %s (restore extract duration: %s)\n",
+		options.Volume, archive, time.Since(extractStarted).Round(time.Millisecond))
 	_, _ = fmt.Fprintln(options.Stderr, "nothing was started back up; restart the stack that uses this volume yourself")
+	_, _ = fmt.Fprintf(options.Stderr, "restore workflow completed in %s\n", time.Since(workflowStarted).Round(time.Millisecond))
 	return nil
 }
 
@@ -520,12 +536,13 @@ func relabelRestoreVolume(ctx context.Context, dockerEnv []string, volume string
 }
 
 func runRestoreContainer(ctx context.Context, dockerEnv []string, stdout, stderr io.Writer, volume, dataDir, name string) error {
-	script := fmt.Sprintf("rm -rf /target/..?* /target/.[!.]* /target/* 2>/dev/null || exit 21; tar -C /target -xf '/seed/%s.tar' || exit 22", name)
+	archive := filepath.Join(dataDir, name+".tar")
+	script := fmt.Sprintf("rm -rf /target/..?* /target/.[!.]* /target/* 2>/dev/null || exit 21; printf 'extracting archive %%s into volume %%s…\\n' \"$1\" \"$2\" >&2; tar -C /target -xf '/seed/%s.tar' || exit 22", name)
 	cmd := exec.CommandContext(ctx, "docker",
 		"run", "--rm",
 		"--mount", "type=volume,src="+volume+",dst=/target",
 		"--mount", "type=bind,src="+dataDir+",dst=/seed,readonly",
-		"alpine", "sh", "-c", script)
+		"alpine", "sh", "-c", script, "restore", archive, volume)
 	cmd.Env = dockerEnv
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

@@ -39,6 +39,21 @@ container with the seed directory bind-mounted, so the bytes move at disk
 speed (a 32 GB volume measured ~20 s each way). The tar is deliberately
 uncompressed — compress a seed yourself when you need to ship or keep many.
 
+## Progress and timing
+
+Phase notices go to stderr, including when output is redirected. Restore
+announces the archive and its size before checking its checksum, then reports
+verification time only after the checksum matches. Older seeds use a timed
+tar-header check instead. Capture announces when archive creation moves on to
+checksum generation. `--no-verify` does not report successful verification.
+
+Restore's final timings distinguish extraction from total workflow wall time.
+Total time includes verification, stopping users, and waiting for confirmation;
+it is not a measure of extraction speed. Extraction time runs from the
+container's extract notice until Docker returns, including container teardown.
+These are phase notices, not a live byte counter, percentage, or throughput
+meter.
+
 ## Safety model
 
 Restore is not reversible: it clears the target before tar reads a byte. Three
