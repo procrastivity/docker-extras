@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRestoreIntegrityRefusalsPrecedeSurveyAndStop(t *testing.T) {
@@ -86,7 +87,7 @@ func TestRestoreIntegrityRefusalsPrecedeSurveyAndStop(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			log, state, _ := installRestoreFakeDocker(t)
+			log, state, target := installRestoreFakeDocker(t)
 			original := createRestoreTar(t, "seed payload")
 			archive, explicitMeta := tc.mutate(original)
 			dataDir := t.TempDir()
@@ -108,8 +109,19 @@ func TestRestoreIntegrityRefusalsPrecedeSurveyAndStop(t *testing.T) {
 			if tc.wantNoHash && strings.Contains(string(mustReadFile(t, log)), "sha256sum") {
 				t.Fatal("invalid metadata or byte-count mismatch reached checksum command")
 			}
+			if tc.name == "same-size bit flip" {
+				if !strings.Contains(stderr.String(), "verifying archive ") || strings.Contains(stderr.String(), "verified archive ") {
+					t.Fatalf("checksum mismatch output must show start but no success: %q", stderr.String())
+				}
+			}
 			if got := string(mustReadFile(t, state)); got != "present\n" {
 				t.Fatalf("target state=%q, want unchanged present volume", got)
+			}
+			if got := string(mustReadFile(t, target)); got != "old\n" {
+				t.Fatalf("integrity refusal changed target contents to %q", got)
+			}
+			if got := mustReadFile(t, filepath.Join(dataDir, "seed.tar")); !bytes.Equal(got, archive) {
+				t.Fatalf("integrity refusal changed source archive bytes: got %d, want %d", len(got), len(archive))
 			}
 		})
 	}
@@ -121,10 +133,15 @@ func TestRestoreLegacyPairAbsenceUsesTarListingOnly(t *testing.T) {
 		dataDir := t.TempDir()
 		archive := createRestoreTar(t, "legacy payload")
 		writeRestoreSeed(t, dataDir, "seed", archive, "image=alpine:3.22\n", nil)
-		options := restoreTestOptions(dataDir, "", io.Discard)
+		var stderr bytes.Buffer
+		options := restoreTestOptions(dataDir, "", &stderr)
 		options.Yes = true
 		if err := restoreVolumeSeed(context.Background(), options); err != nil {
 			t.Fatalf("legacy restore error: %v", err)
+		}
+		assertOutputOrder(t, stderr.String(), "checking legacy tar headers", "legacy tar headers valid", "restoring ", "restore extract duration:", "restore workflow completed in")
+		if strings.Contains(stderr.String(), "verified archive") {
+			t.Fatalf("legacy tar fallback claimed a SHA-256 verification: %q", stderr.String())
 		}
 		calls := string(mustReadFile(t, log))
 		if !strings.Contains(calls, "tar\t-tf\t/seed/seed.tar") || strings.Contains(calls, "sha256sum") {
@@ -136,14 +153,117 @@ func TestRestoreLegacyPairAbsenceUsesTarListingOnly(t *testing.T) {
 		log, _, _ := installRestoreFakeDocker(t)
 		dataDir := t.TempDir()
 		writeRestoreSeed(t, dataDir, "seed", []byte("not a tar"), "image=alpine:3.22\n", nil)
-		options := restoreTestOptions(dataDir, "", io.Discard)
+		var stderr bytes.Buffer
+		options := restoreTestOptions(dataDir, "", &stderr)
 		options.Yes = true
 		err := restoreVolumeSeed(context.Background(), options)
 		if err == nil || !strings.Contains(err.Error(), "tar -tf failed") || restoreExitCode(err) != 1 {
 			t.Fatalf("legacy tar error=%v, want exit 1 header refusal", err)
 		}
+		if !strings.Contains(stderr.String(), "checking legacy tar headers") || strings.Contains(stderr.String(), "legacy tar headers valid") {
+			t.Fatalf("legacy tar refusal phase output is not truthful: %q", stderr.String())
+		}
 		assertRestoreNoSurveyOrStops(t, string(mustReadFile(t, log)))
 	})
+}
+
+func TestRestoreHashNoticePrecedesBlockingVerification(t *testing.T) {
+	log, _, target := installRestoreFakeDocker(t)
+	dataDir := t.TempDir()
+	writeValidRestoreSeed(t, dataDir)
+	gateDir := t.TempDir()
+	t.Setenv("FAKE_DOCKER_GATE_DIR", gateDir)
+	stderr := newSynchronizedProgressBuffer("verifying archive ")
+	stdout := &synchronizedProgressBuffer{}
+	options := restoreTestOptions(dataDir, "", stderr)
+	options.Stdout = stdout
+	result := make(chan error, 1)
+	go func() { result <- restoreVolumeSeed(context.Background(), options) }()
+	defer func() { _ = os.WriteFile(filepath.Join(gateDir, "release"), nil, 0o600) }()
+
+	select {
+	case <-stderr.noticed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restore checksum notice was not emitted")
+	}
+	waitForFakeDockerGate(t, gateDir)
+	select {
+	case err := <-result:
+		t.Fatalf("restore completed while fake sha256sum was blocked: %v", err)
+	default:
+	}
+	archive := filepath.Join(dataDir, "seed.tar")
+	if !strings.Contains(stderr.String(), fmt.Sprintf("verifying archive %s (%d bytes)", archive, len(mustReadFile(t, archive)))) {
+		t.Fatalf("restore checksum notice omitted archive path/size: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "verified archive ") {
+		t.Fatalf("restore claimed verification before checksum completed: %q", stderr.String())
+	}
+	_ = os.WriteFile(filepath.Join(gateDir, "release"), nil, 0o600)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("restore failed after releasing checksum gate: %v\nstderr=%s", err, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restore did not finish after releasing checksum gate")
+	}
+	assertOutputOrder(t, stderr.String(), "verifying archive ", "verified archive ", "restoring ", "restore extract duration:", "restore workflow completed in")
+	if got := string(mustReadFile(t, target)); got != "restored\n" {
+		t.Fatalf("target contents=%q, want restored after successful verification", got)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("verification progress leaked to stdout: %q", stdout.String())
+	}
+	if got := string(mustReadFile(t, log)); !strings.Contains(got, "sha256sum\t/seed/seed.tar") {
+		t.Fatalf("blocking verification fixture did not run sha256sum:\n%s", got)
+	}
+}
+
+func TestRestoreLegacyHeaderNoticePrecedesBlockingTarList(t *testing.T) {
+	installRestoreFakeDocker(t)
+	dataDir := t.TempDir()
+	archiveBytes := createRestoreTar(t, "legacy blocking payload")
+	writeRestoreSeed(t, dataDir, "seed", archiveBytes, "image=alpine:3.22\n", nil)
+	gateDir := t.TempDir()
+	t.Setenv("FAKE_DOCKER_GATE_DIR", gateDir)
+	stderr := newSynchronizedProgressBuffer("checking legacy tar headers")
+	options := restoreTestOptions(dataDir, "", stderr)
+	options.Yes = true
+	result := make(chan error, 1)
+	go func() { result <- restoreVolumeSeed(context.Background(), options) }()
+	defer func() { _ = os.WriteFile(filepath.Join(gateDir, "release"), nil, 0o600) }()
+
+	select {
+	case <-stderr.noticed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("legacy tar-header notice was not emitted")
+	}
+	waitForFakeDockerGate(t, gateDir)
+	select {
+	case err := <-result:
+		t.Fatalf("legacy restore completed while fake tar -tf was blocked: %v", err)
+	default:
+	}
+	if !strings.Contains(stderr.String(), fmt.Sprintf("checking legacy tar headers for %s (%d bytes)", filepath.Join(dataDir, "seed.tar"), len(archiveBytes))) {
+		t.Fatalf("legacy notice omitted archive path/size: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "legacy tar headers valid") {
+		t.Fatalf("legacy validation claimed success before tar -tf completed: %q", stderr.String())
+	}
+	_ = os.WriteFile(filepath.Join(gateDir, "release"), nil, 0o600)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("legacy restore failed after releasing tar gate: %v\nstderr=%s", err, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("legacy restore did not finish after releasing tar gate")
+	}
+	assertOutputOrder(t, stderr.String(), "checking legacy tar headers", "legacy tar headers valid", "restoring ", "restore extract duration:", "restore workflow completed in")
+	if strings.Contains(stderr.String(), "verified archive") {
+		t.Fatalf("legacy tar validation was mislabeled as SHA-256 verification: %q", stderr.String())
+	}
 }
 
 func TestRestoreNoVerifyStillEnforcesImageLockAndForceIsNarrow(t *testing.T) {
@@ -176,7 +296,7 @@ func TestRestoreNoVerifyStillEnforcesImageLockAndForceIsNarrow(t *testing.T) {
 		if err := restoreVolumeSeed(context.Background(), options); err != nil {
 			t.Fatalf("forced image mismatch restore: %v", err)
 		}
-		if !strings.Contains(stderr.String(), "continuing per --force") || !strings.Contains(string(mustReadFile(t, log)), "cmp -s - /seed/") {
+		if !strings.Contains(stderr.String(), "continuing per --force") || !strings.Contains(stderr.String(), "integrity verification skipped") || strings.Contains(stderr.String(), "verified archive") || !strings.Contains(string(mustReadFile(t, log)), "cmp -s - /seed/") {
 			t.Fatalf("force warning or required bind preflight missing: stderr=%q\nlog=%s", stderr.String(), mustReadFile(t, log))
 		}
 	})
@@ -196,6 +316,36 @@ func TestRestoreNoVerifyStillEnforcesImageLockAndForceIsNarrow(t *testing.T) {
 			t.Fatal("malformed metadata reached target-user survey")
 		}
 	})
+}
+
+func TestRestoreHashFailureDoesNotClaimVerificationOrMutateTarget(t *testing.T) {
+	log, state, target := installRestoreFakeDocker(t)
+	t.Setenv("FAKE_HASH_FAIL", "true")
+	dataDir := t.TempDir()
+	writeValidRestoreSeed(t, dataDir)
+	report := filepath.Join(t.TempDir(), "report.tsv")
+	if err := os.WriteFile(report, []byte("stale report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	options := restoreTestOptions(dataDir, report, &stderr)
+	err := restoreVolumeSeed(context.Background(), options)
+	if err == nil || restoreExitCode(err) != 1 || !strings.Contains(err.Error(), "could not compute the checksum") {
+		t.Fatalf("hash failure error=%v exit=%d, want verification refusal", err, restoreExitCode(err))
+	}
+	if !strings.Contains(stderr.String(), "verifying archive ") || strings.Contains(stderr.String(), "verified archive ") {
+		t.Fatalf("hash failure output did not distinguish start from success: %q", stderr.String())
+	}
+	if got := string(mustReadFile(t, report)); got != "" {
+		t.Fatalf("hash refusal report=%q, want empty", got)
+	}
+	if got := string(mustReadFile(t, state)); got != "present\n" {
+		t.Fatalf("hash refusal changed target volume state to %q", got)
+	}
+	if got := string(mustReadFile(t, target)); got != "old\n" {
+		t.Fatalf("hash refusal changed target data to %q", got)
+	}
+	assertRestoreNoSurveyOrStops(t, string(mustReadFile(t, log)))
 }
 
 func TestRestoreUnknownImageLockRequiresExplicitOverride(t *testing.T) {
@@ -483,12 +633,16 @@ func TestRestoreRelabelAndRunFailureExitClassification(t *testing.T) {
 			t.Setenv("FAKE_RESTORE_RUN_EXIT", tc.runExit)
 			dataDir := t.TempDir()
 			writeValidRestoreSeed(t, dataDir)
-			options := restoreTestOptions(dataDir, "", io.Discard)
+			var stderr bytes.Buffer
+			options := restoreTestOptions(dataDir, "", &stderr)
 			options.Labels = []string{"owner=new"}
 			options.Yes = true
 			err := restoreVolumeSeed(context.Background(), options)
 			if err == nil || restoreExitCode(err) != tc.wantExit {
 				t.Fatalf("restore error=%v exit=%d, want %d", err, restoreExitCode(err), tc.wantExit)
+			}
+			if !strings.Contains(stderr.String(), "verified archive ") || strings.Contains(stderr.String(), "done →") || strings.Contains(stderr.String(), "restore workflow completed") {
+				t.Fatalf("later failure must retain successful verification without claiming workflow success: %q", stderr.String())
 			}
 			calls := string(mustReadFile(t, log))
 			if tc.wantNoRun && restoreContainerWasCalled(calls) {
@@ -671,7 +825,10 @@ func TestRestoreDaemonBackedPluginReplacesVolumeAfterDirectStop(t *testing.T) {
 		t.Fatalf("start disposable direct user: %v\n%s", err, output)
 	}
 
-	dataDir := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "seed 'quoted' $(printf substituted) `printf expanded` $HOME")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	archive := createRestoreTar(t, "restored payload")
 	writeRestoreSeed(t, dataDir, "daemon-seed", archive, "", metadataForSeed)
 	report := filepath.Join(t.TempDir(), "report.tsv")
@@ -687,6 +844,10 @@ func TestRestoreDaemonBackedPluginReplacesVolumeAfterDirectStop(t *testing.T) {
 	if !strings.Contains(output, "stopping container '") || !strings.Contains(output, "restoring ") || !strings.Contains(output, "nothing was started back up") {
 		t.Fatalf("restore plugin output omitted stop/recovery contract: %s", output)
 	}
+	if !strings.Contains(output, "extracting archive "+filepath.Join(dataDir, "daemon-seed.tar")) {
+		t.Fatalf("restore progress did not preserve the literal archive path: %s", output)
+	}
+	assertOutputOrder(t, output, "verifying archive ", "verified archive ", "restoring ", "extracting archive ", "restore extract duration:", "restore workflow completed in")
 	state, err := runDockerCommandOutput(t, "inspect", "--format", "{{.State.Running}}", container)
 	if err != nil || strings.TrimSpace(state) != "false" {
 		t.Fatalf("direct container after restore state=%q err=%v, want preserved and stopped", state, err)
@@ -756,6 +917,11 @@ bind_source() {
   done
   return 1
 }
+wait_for_gate() {
+  [ -n "${FAKE_DOCKER_GATE_DIR-}" ] || return 0
+  : > "$FAKE_DOCKER_GATE_DIR/reached"
+  while [ ! -e "$FAKE_DOCKER_GATE_DIR/release" ]; do sleep 0.01; done
+}
 
 case "$1" in
   version) printf '29.0.0\n' ;;
@@ -821,22 +987,26 @@ case "$1" in
         ;;
       *'sha256sum /seed/'*)
         source=$(bind_source "$@") || exit 87
+        if [ "${FAKE_HASH_FAIL-false}" = true ]; then echo 'simulated checksum command failure' >&2; exit 41; fi
+        wait_for_gate
         sha256sum "$source/$FAKE_RESTORE_NAME.tar"
         ;;
       *'tar -tf /seed/'*)
         source=$(bind_source "$@") || exit 88
+        wait_for_gate
         tar -tf "$source/$FAKE_RESTORE_NAME.tar" >/dev/null
         ;;
       *"test -f '/seed/"*)
         if [ "${FAKE_REMOTE_ARCHIVE_MISSING-false}" = true ]; then echo 'selected daemon archive path missing' >&2; exit 125; fi
         ;;
       *'rm -rf /target/..?*'*)
+        source=$(bind_source "$@") || exit 89
         case "${FAKE_RESTORE_RUN_EXIT-}" in
           21) printf 'cleared\n' > "$FAKE_TARGET_CONTENT"; exit 21 ;;
-          22) printf 'partial\n' > "$FAKE_TARGET_CONTENT"; exit 22 ;;
+          22) printf 'extracting archive %s into volume %s…\n' "$source/$FAKE_RESTORE_NAME.tar" "$FAKE_RESTORE_VOLUME" >&2; printf 'partial\n' > "$FAKE_TARGET_CONTENT"; exit 22 ;;
           125|126|127) echo 'simulated container start failure' >&2; exit "$FAKE_RESTORE_RUN_EXIT" ;;
-          42) printf 'partial\n' > "$FAKE_TARGET_CONTENT"; exit 42 ;;
-          *) printf 'restored\n' > "$FAKE_TARGET_CONTENT" ;;
+          42) printf 'extracting archive %s into volume %s…\n' "$source/$FAKE_RESTORE_NAME.tar" "$FAKE_RESTORE_VOLUME" >&2; printf 'partial\n' > "$FAKE_TARGET_CONTENT"; exit 42 ;;
+          *) printf 'extracting archive %s into volume %s…\n' "$source/$FAKE_RESTORE_NAME.tar" "$FAKE_RESTORE_VOLUME" >&2; printf 'restored\n' > "$FAKE_TARGET_CONTENT" ;;
         esac
         ;;
       *) exit 89 ;;
@@ -866,6 +1036,8 @@ esac
 	t.Setenv("FAKE_CREATE_MODE", "")
 	t.Setenv("FAKE_RESTORE_RUN_EXIT", "")
 	t.Setenv("FAKE_REMOTE_ARCHIVE_MISSING", "false")
+	t.Setenv("FAKE_HASH_FAIL", "false")
+	t.Setenv("FAKE_DOCKER_GATE_DIR", "")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return log, state, target
 }

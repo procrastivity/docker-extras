@@ -196,13 +196,14 @@ func captureVolumeSeed(ctx context.Context, options captureOptions) (retErr erro
 	started := time.Now()
 	uid, gid := os.Getuid(), os.Getgid()
 	archivePath := "/seed/" + options.Name + ".tar.tmp"
-	script := fmt.Sprintf("set -eu; tar -C /source -cf %q .; chown %d:%d %q; sha256sum %q",
-		archivePath, uid, gid, archivePath, archivePath)
-	shaOutput, err := dockerOutput(ctx, dockerEnv, options.Stderr,
+	script := fmt.Sprintf("set -eu; tar -C /source -cf %q .; chown %d:%d %q; bytes=$(stat -c %%s %q); printf 'hashing archive %%s (%%s bytes)…\\n' \"$1\" \"$bytes\" >&2; sha256sum %q",
+		archivePath, uid, gid, archivePath, archivePath, archivePath)
+	hashProgress := &timedMarkerWriter{dst: options.Stderr, marker: "hashing archive "}
+	shaOutput, err := dockerOutput(ctx, dockerEnv, hashProgress,
 		"run", "--rm",
 		"--mount", "type=volume,src="+options.Volume+",dst=/source,readonly",
 		"--mount", "type=bind,src="+dataDir+",dst=/seed",
-		"alpine", "sh", "-c", script)
+		"alpine", "sh", "-c", script, "capture", archiveTmp)
 	if err != nil {
 		return fmt.Errorf("volume archive (tar) failed: %w", err)
 	}
@@ -222,6 +223,10 @@ func captureVolumeSeed(ctx context.Context, options captureOptions) (retErr erro
 		return fmt.Errorf("archive output %s is not a regular file", archiveTmp)
 	}
 	bytes := archiveInfo.Size()
+	if !hashProgress.startedAt.IsZero() {
+		_, _ = fmt.Fprintf(options.Stderr, "SHA-256 computed for %s (%d bytes; hash duration %s)\n",
+			archiveTmp, bytes, time.Since(hashProgress.startedAt).Round(time.Millisecond))
+	}
 	date := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	metadata := fmt.Sprintf("source_volume=%s\nimage=%s\nproject=%s\ndate=%s\nbytes=%d\nsha256=%s\n",
 		options.Volume, image, project, date, bytes, sha)
@@ -236,6 +241,33 @@ func captureVolumeSeed(ctx context.Context, options captureOptions) (retErr erro
 	}
 	_, _ = fmt.Fprintf(options.Stderr, "done → %s (%s)\n", archive, time.Since(started).Round(time.Second))
 	return nil
+}
+
+// timedMarkerWriter forwards stderr unchanged and records when a subprocess
+// emits a phase-start notice. The marker itself is human-readable output, so
+// callers can measure a phase without putting progress text on stdout.
+type timedMarkerWriter struct {
+	dst       io.Writer
+	marker    string
+	tail      []byte
+	startedAt time.Time
+}
+
+func (w *timedMarkerWriter) Write(p []byte) (int, error) {
+	if w.startedAt.IsZero() {
+		candidate := make([]byte, 0, len(w.tail)+len(p))
+		candidate = append(candidate, w.tail...)
+		candidate = append(candidate, p...)
+		if bytes.Contains(candidate, []byte(w.marker)) {
+			w.startedAt = time.Now()
+		}
+		keep := len(w.marker) - 1
+		if keep > len(candidate) {
+			keep = len(candidate)
+		}
+		w.tail = append(w.tail[:0], candidate[len(candidate)-keep:]...)
+	}
+	return w.dst.Write(p)
 }
 
 func truncateCaptureReport(path string) error {
