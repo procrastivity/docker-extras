@@ -54,6 +54,13 @@ container's extract notice until Docker returns, including container teardown.
 These are phase notices, not a live byte counter, percentage, or throughput
 meter.
 
+Capture's final `done` line labels the archive duration separately from total
+workflow time. The archive interval runs from the archiving notice until the
+hash-start notice is observed, including Docker startup but excluding hashing.
+Total capture time also includes preflight, confirmation, stopping users,
+hashing, publication, and temporary-file cleanup. A failed capture does not
+report successful workflow completion.
+
 ## Safety model
 
 Restore is not reversible: it clears the target before tar reads a byte. Three
