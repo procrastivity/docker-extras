@@ -77,12 +77,18 @@ func runCaptureCommand(cmd *cobra.Command, _ []string) error {
 }
 
 func captureVolumeSeed(ctx context.Context, options captureOptions) (retErr error) {
+	workflowStarted := time.Now()
 	if options.Stdout == nil {
 		options.Stdout = io.Discard
 	}
 	if options.Stderr == nil {
 		options.Stderr = io.Discard
 	}
+	defer func() {
+		if retErr == nil {
+			_, _ = fmt.Fprintf(options.Stderr, "capture workflow completed in %s\n", time.Since(workflowStarted).Round(time.Millisecond))
+		}
+	}()
 	if options.Volume == "" {
 		return errors.New("capture requires --from-volume")
 	}
@@ -239,7 +245,12 @@ func captureVolumeSeed(ctx context.Context, options captureOptions) (retErr erro
 	if err := os.Rename(metaTmp, meta); err != nil {
 		return fmt.Errorf("could not move metadata into place: %w", err)
 	}
-	_, _ = fmt.Fprintf(options.Stderr, "done → %s (%s)\n", archive, time.Since(started).Round(time.Second))
+	if !hashProgress.startedAt.IsZero() {
+		_, _ = fmt.Fprintf(options.Stderr, "done → %s (capture archive duration: %s)\n",
+			archive, hashProgress.startedAt.Sub(started).Round(time.Millisecond))
+	} else {
+		_, _ = fmt.Fprintf(options.Stderr, "done → %s\n", archive)
+	}
 	return nil
 }
 

@@ -34,6 +34,7 @@ func TestCaptureWritesArchiveMetadataAndQuiesceReportOnSelectedCLIContext(t *tes
 
 	var stdout, stderr bytes.Buffer
 	confirmations := 0
+	var confirmationWait time.Duration
 	err := captureVolumeSeed(context.Background(), captureOptions{
 		Volume:     "capture-volume",
 		Name:       "fake-seed",
@@ -54,6 +55,9 @@ func TestCaptureWritesArchiveMetadataAndQuiesceReportOnSelectedCLIContext(t *tes
 					t.Errorf("confirmation happened before announcement %q: %s", expected, stderr.String())
 				}
 			}
+			started := time.Now()
+			time.Sleep(150 * time.Millisecond)
+			confirmationWait = time.Since(started)
 			return true, nil
 		},
 	})
@@ -72,7 +76,12 @@ func TestCaptureWritesArchiveMetadataAndQuiesceReportOnSelectedCLIContext(t *tes
 	if !strings.Contains(stderr.String(), "compose project 'alpha' was taken down") || !strings.Contains(stderr.String(), "'docker start plain'") {
 		t.Fatalf("successful quiesce recovery guidance missing: %q", stderr.String())
 	}
-	assertOutputOrder(t, stderr.String(), "archiving volume", "hashing archive ", "SHA-256 computed for ", "done →")
+	assertOutputOrder(t, stderr.String(), "archiving volume", "hashing archive ", "SHA-256 computed for ", "done →", "capture archive duration:", "capture workflow completed in ")
+	archiveDuration := captureOutputDuration(t, stderr.String(), "capture archive duration: ")
+	workflowDuration := captureOutputDuration(t, stderr.String(), "capture workflow completed in ")
+	if workflowDuration-archiveDuration < confirmationWait {
+		t.Fatalf("workflow time %s must include confirmation wait %s outside archive time %s", workflowDuration, confirmationWait, archiveDuration)
+	}
 	if !strings.Contains(stderr.String(), fmt.Sprintf("hashing archive %s/fake-seed.tar.tmp (%d bytes)", dataDir, len(payload))) {
 		t.Fatalf("capture hash notice omitted archive path/size: %q", stderr.String())
 	}
@@ -314,6 +323,9 @@ func TestCaptureArchiveFailureKeepsRecoveryGuidanceAndCleansTemps(t *testing.T) 
 	if !strings.Contains(stderr.String(), "compose project 'alpha' was taken down") || !strings.Contains(stderr.String(), "'docker start plain'") {
 		t.Fatalf("stopped-user recovery guidance missing after archive failure: %q", stderr.String())
 	}
+	if strings.Contains(stderr.String(), "done →") || strings.Contains(stderr.String(), "capture workflow completed") {
+		t.Fatalf("archive failure claimed capture completion: %q", stderr.String())
+	}
 	for _, path := range []string{filepath.Join(dataDir, "archive-failure.tar.tmp"), filepath.Join(dataDir, "archive-failure.meta.tmp")} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("temporary file %q remains: %v", path, err)
@@ -359,6 +371,12 @@ func TestCaptureHashNoticePrecedesBlockingHashAndKeepsChecksumOffStdout(t *testi
 	if !strings.Contains(stderr.String(), fmt.Sprintf("hashing archive %s (%d bytes)", archiveTmp, len(payload))) {
 		t.Fatalf("capture hash notice omitted exact temporary archive path/size: %q", stderr.String())
 	}
+	if strings.Contains(stderr.String(), "done →") || strings.Contains(stderr.String(), "capture workflow completed") {
+		t.Fatalf("capture claimed success while hashing was still blocked: %q", stderr.String())
+	}
+	blockedAt := time.Now()
+	time.Sleep(150 * time.Millisecond)
+	hashWait := time.Since(blockedAt)
 	_ = os.WriteFile(filepath.Join(gateDir, "release"), nil, 0o600)
 	select {
 	case err := <-result:
@@ -368,7 +386,12 @@ func TestCaptureHashNoticePrecedesBlockingHashAndKeepsChecksumOffStdout(t *testi
 	case <-time.After(5 * time.Second):
 		t.Fatal("capture did not finish after releasing hash gate")
 	}
-	assertOutputOrder(t, stderr.String(), "hashing archive ", "SHA-256 computed for ", "done →")
+	assertOutputOrder(t, stderr.String(), "hashing archive ", "SHA-256 computed for ", "done →", "capture archive duration:", "capture workflow completed in ")
+	archiveDuration := captureOutputDuration(t, stderr.String(), "capture archive duration: ")
+	workflowDuration := captureOutputDuration(t, stderr.String(), "capture workflow completed in ")
+	if workflowDuration-archiveDuration < hashWait {
+		t.Fatalf("workflow time %s must include blocked hash wait %s outside archive time %s", workflowDuration, hashWait, archiveDuration)
+	}
 	if got := stdout.String(); got != "" || strings.Contains(got, "sha256") {
 		t.Fatalf("internal checksum output contaminated caller stdout: %q", got)
 	}
@@ -392,7 +415,7 @@ func TestCaptureHashFailureDoesNotPublishArchiveOrSuccessNotice(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "volume archive (tar) failed") {
 		t.Fatalf("capture error=%v, want checksum subprocess failure", err)
 	}
-	if !strings.Contains(stderr.String(), "hashing archive ") || strings.Contains(stderr.String(), "SHA-256 computed for ") || strings.Contains(stderr.String(), "done →") {
+	if !strings.Contains(stderr.String(), "hashing archive ") || strings.Contains(stderr.String(), "SHA-256 computed for ") || strings.Contains(stderr.String(), "done →") || strings.Contains(stderr.String(), "capture workflow completed") {
 		t.Fatalf("failed hash phase emitted missing start or false success: %q", stderr.String())
 	}
 	for _, path := range []string{
@@ -517,7 +540,7 @@ volumes:
 	if !strings.Contains(output, "hashing archive "+filepath.Join(dataDir, "daemon-seed.tar.tmp")) {
 		t.Fatalf("capture progress did not preserve the literal archive path: %s", output)
 	}
-	assertOutputOrder(t, output, "archiving volume ", "hashing archive ", "SHA-256 computed for ", "done →")
+	assertOutputOrder(t, output, "archiving volume ", "hashing archive ", "SHA-256 computed for ", "done →", "capture archive duration:", "capture workflow completed in ")
 	if !dockerObjectExists(t, "volume", volume) {
 		t.Fatalf("capture's Compose down removed volume %q", volume)
 	}
@@ -753,6 +776,19 @@ func assertOutputOrder(t *testing.T, output string, phrases ...string) {
 	}
 }
 
+func captureOutputDuration(t *testing.T, output, label string) time.Duration {
+	t.Helper()
+	match := regexp.MustCompile(regexp.QuoteMeta(label) + `([^\s)]+)`).FindStringSubmatch(output)
+	if len(match) != 2 {
+		t.Fatalf("missing duration %q in %q", label, output)
+	}
+	duration, err := time.ParseDuration(match[1])
+	if err != nil || duration < 0 {
+		t.Fatalf("invalid duration %q: %v", match[1], err)
+	}
+	return duration
+}
+
 func assertNoCaptureTemps(t *testing.T, dataDir, name string) {
 	t.Helper()
 	for _, path := range []string{filepath.Join(dataDir, name+".tar.tmp"), filepath.Join(dataDir, name+".meta.tmp")} {
@@ -831,6 +867,9 @@ func TestCaptureDeclineMapsToExitCode3(t *testing.T) {
 	}, &stdout, &stderr, "dev", "extras")
 	if got := commandExitCode(err); got != 3 || !errors.Is(err, errQuiesceDeclined) {
 		t.Fatalf("declined command error=%v exit=%d, want errQuiesceDeclined/3", err, got)
+	}
+	if strings.Contains(stderr.String(), "capture workflow completed") {
+		t.Fatalf("decline claimed capture completion: %q", stderr.String())
 	}
 	logContents := string(mustReadFile(t, log))
 	if strings.Contains(logContents, "call\tcompose") || strings.Contains(logContents, "call\tstop") || strings.Contains(logContents, "call\trun\t--rm\t--mount\ttype=volume") {
