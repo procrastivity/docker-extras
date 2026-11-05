@@ -275,23 +275,36 @@ if [ -e "$STATE_FILE" ] || [ -L "$STATE_FILE" ]; then
     *) die "malformed or unsupported install record $STATE_FILE" ;;
   esac
 
+  # A recorded path that is fully absent (deleted outside this installer) has
+  # nothing to overwrite or remove, so it drops out of the audited entries.
+  # Every later step (owned, the removal loop) sees only verified entries.
+  : > "$tmp/old-entries.present"
   while IFS='|' read -r kind old_path expected; do
+    if [ ! -e "$old_path" ] && [ ! -L "$old_path" ]; then
+      case "$kind" in
+        file|link) say "recorded $kind is already gone; skipping it: $old_path" ;;
+        *) die "malformed install record entry in $STATE_FILE" ;;
+      esac
+      continue
+    fi
     case "$kind" in
       file)
         if [ ! -f "$old_path" ] || [ -L "$old_path" ]; then
-          die "refusing missing, non-regular, or symlinked recorded file: $old_path"
+          die "refusing non-regular or symlinked recorded file: $old_path"
         fi
         actual=$(hash_file "$old_path") || die "could not hash recorded file: $old_path"
         [ "$actual" = "$expected" ] || die "refusing modified recorded file: $old_path"
         ;;
       link)
-        [ -L "$old_path" ] || die "refusing missing or replaced recorded link: $old_path"
+        [ -L "$old_path" ] || die "refusing replaced recorded link: $old_path"
         actual=$(readlink "$old_path") || die "could not read recorded link: $old_path"
         [ "$actual" = "$expected" ] || die "refusing retargeted recorded link: $old_path"
         ;;
       *) die "malformed install record entry in $STATE_FILE" ;;
     esac
+    printf '%s|%s|%s\n' "$kind" "$old_path" "$expected" >> "$tmp/old-entries.present"
   done < "$tmp/old-entries"
+  mv -f "$tmp/old-entries.present" "$tmp/old-entries"
   have_old_state=1
 fi
 
