@@ -378,6 +378,98 @@ fi
 cmp -s "$GO1_PLUGIN" "$work/go1-plugin.snapshot" || fail "modified plugin-only file changed on refusal"
 require_absent "$GO1_HOME/.local/bin/docker-extras"
 
+say "recorded entries deleted outside the installer do not block install or uninstall"
+# The reported case: a plugin-only Go v1 record whose plugin file is gone.
+create_plugin_only_install "$work/go1-absent"
+rm "$GO1_PLUGIN"
+run_install "$GO1_HOME" "$GO1_STATE" >/dev/null 2>"$work/go1-absent.log" ||
+  fail "install refused a v1 record whose plugin file is gone: $(cat "$work/go1-absent.log")"
+grep -Fq "recorded file is already gone; skipping it: $GO1_PLUGIN" "$work/go1-absent.log" ||
+  fail "install did not report the skipped absent entry"
+require_file "$GO1_HOME/.local/bin/docker-extras"
+require_link "$GO1_PLUGIN" "$GO1_HOME/.local/bin/docker-extras"
+grep -Fqx 'version|2' "$GO1_STATE_FILE" || fail "absent v1 plugin record was not rewritten as version 2"
+grep -Fqx "link|$GO1_PLUGIN|$GO1_HOME/.local/bin/docker-extras" "$GO1_STATE_FILE" ||
+  fail "rewritten record does not list the new link"
+run_uninstall "$GO1_HOME" "$GO1_STATE" >/dev/null
+require_absent "$GO1_PLUGIN"
+require_absent "$GO1_STATE_FILE"
+
+# v1 Bash record: the tool is gone, the plugin is present and still verified.
+create_legacy_install "$work/legacy-absent-tool"
+rm "$LEGACY_BIN/docker-extras-volume-seed"
+run_install "$LEGACY_HOME" "$LEGACY_STATE" DOCKER_EXTRAS_PLUGIN_NAME=tools >/dev/null 2>"$work/legacy-absent.log" ||
+  fail "install refused a v1 record whose tool is gone: $(cat "$work/legacy-absent.log")"
+require_absent "$LEGACY_PLUGIN"
+require_link "$LEGACY_HOME/.docker/cli-plugins/docker-tools" "$LEGACY_HOME/.local/bin/docker-extras"
+grep -Fq 'removed 1 obsolete file(s)' "$work/legacy-absent.log" || fail "removed count includes the absent entry"
+grep -Fqx 'version|2' "$LEGACY_STATE_FILE" || fail "absent v1 tool record was not rewritten as version 2"
+
+# v2 record: binary and link both gone, or only the binary gone (dangling link).
+for missing in both bin; do
+  home="$work/home-v2-absent-$missing"
+  state="$work/state-v2-absent-$missing"
+  state_file="$state/docker-extras/install.tsv"
+  bin="$home/.local/bin/docker-extras"
+  plugin="$home/.docker/cli-plugins/docker-extras"
+  run_install "$home" "$state" >/dev/null
+  cp "$state_file" "$work/v2-absent-$missing.snapshot"
+  rm "$bin"
+  [ "$missing" = bin ] || rm "$plugin"
+  run_install "$home" "$state" >/dev/null 2>"$work/v2-absent-$missing.log" ||
+    fail "install refused a v2 record with missing $missing: $(cat "$work/v2-absent-$missing.log")"
+  require_file "$bin"
+  require_link "$plugin" "$bin"
+  cmp -s "$state_file" "$work/v2-absent-$missing.snapshot" || fail "v2 record ($missing missing) was not rewritten"
+  rm "$bin"
+  [ "$missing" = bin ] || rm "$plugin"
+  run_uninstall "$home" "$state" >/dev/null 2>"$work/v2-absent-$missing-uninstall.log" ||
+    fail "uninstall refused a v2 record with missing $missing: $(cat "$work/v2-absent-$missing-uninstall.log")"
+  grep -Fq "recorded file is already gone; skipping it: $bin" "$work/v2-absent-$missing-uninstall.log" ||
+    fail "uninstall did not report the skipped absent binary"
+  require_absent "$plugin"
+  require_absent "$state_file"
+done
+
+# Uninstall of a v1 record with one entry gone removes the rest.
+create_legacy_install "$work/legacy-absent-uninstall"
+rm "$LEGACY_PLUGIN"
+run_uninstall "$LEGACY_HOME" "$LEGACY_STATE" >/dev/null 2>&1 || fail "uninstall refused a v1 record with a missing plugin"
+require_absent "$LEGACY_BIN/docker-extras-volume-seed"
+require_absent "$LEGACY_STATE_FILE"
+
+# A dangling symlink where a file was recorded is not absent and still blocks.
+create_plugin_only_install "$work/go1-dangling"
+rm "$GO1_PLUGIN"
+ln -s "$work/go1-dangling/nowhere" "$GO1_PLUGIN"
+cp "$GO1_STATE_FILE" "$work/go1-dangling-state.snapshot"
+if run_install "$GO1_HOME" "$GO1_STATE" >"$work/go1-dangling.log" 2>&1; then
+  fail "install accepted a dangling symlink at a recorded file path"
+fi
+grep -Fq 'refusing non-regular or symlinked recorded file' "$work/go1-dangling.log" || fail "dangling symlink refusal was unclear"
+if run_uninstall "$GO1_HOME" "$GO1_STATE" >/dev/null 2>&1; then
+  fail "uninstall accepted a dangling symlink at a recorded file path"
+fi
+[ "$(readlink "$GO1_PLUGIN")" = "$work/go1-dangling/nowhere" ] || fail "dangling symlink changed on refusal"
+cmp -s "$GO1_STATE_FILE" "$work/go1-dangling-state.snapshot" || fail "state changed on dangling symlink refusal"
+require_absent "$GO1_HOME/.local/bin/docker-extras"
+
+# One absent entry does not excuse a modified one beside it.
+create_legacy_install "$work/legacy-absent-modified"
+rm "$LEGACY_BIN/docker-extras-volume-seed"
+printf 'user edit\n' >> "$LEGACY_PLUGIN"
+cp "$LEGACY_PLUGIN" "$work/absent-modified-plugin.snapshot"
+cp "$LEGACY_STATE_FILE" "$work/absent-modified-state.snapshot"
+if run_install "$LEGACY_HOME" "$LEGACY_STATE" >/dev/null 2>&1; then
+  fail "install accepted a modified entry beside an absent one"
+fi
+if run_uninstall "$LEGACY_HOME" "$LEGACY_STATE" >/dev/null 2>&1; then
+  fail "uninstall accepted a modified entry beside an absent one"
+fi
+cmp -s "$LEGACY_PLUGIN" "$work/absent-modified-plugin.snapshot" || fail "modified plugin changed on refusal"
+cmp -s "$LEGACY_STATE_FILE" "$work/absent-modified-state.snapshot" || fail "state changed on refusal"
+require_absent "$LEGACY_HOME/.local/bin/docker-extras"
+
 say "re-install is idempotent; renames and moves across upgrades remove only the old owned entries"
 home="$work/home-upgrade"
 state="$work/state-upgrade"

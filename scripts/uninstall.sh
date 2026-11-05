@@ -38,8 +38,10 @@ else
 fi
 
 entries=$(mktemp)
-trap 'rm -f "$entries"' EXIT
-trap 'rm -f "$entries"; exit 1' HUP INT TERM
+present=""
+trap 'rm -f "$entries" ${present:+"$present"}' EXIT
+trap 'rm -f "$entries" ${present:+"$present"}; exit 1' HUP INT TERM
+present=$(mktemp)
 
 check_plugin_name() {
   case "$1" in
@@ -153,31 +155,41 @@ case "$version" in
   *) die "malformed or unsupported install record $STATE_FILE" ;;
 esac
 
-# Verify every owned entry before making the first removal.
+# Verify every owned entry before making the first removal. A recorded path
+# that is fully absent (deleted outside the installer) has nothing to remove,
+# so it drops out of the verified list; the record is still cleared.
 count=0
 while IFS='|' read -r kind path expected; do
   count=$((count + 1))
   case "$kind" in
+    file|link) ;;
+    *) die "malformed install record entry in $STATE_FILE" ;;
+  esac
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    say "recorded $kind is already gone; skipping it: $path"
+    continue
+  fi
+  case "$kind" in
     file)
       if [ ! -f "$path" ] || [ -L "$path" ]; then
-        die "refusing missing, non-regular, or symlinked file: $path"
+        die "refusing non-regular or symlinked file: $path"
       fi
       actual=$(hash_file "$path") || die "could not hash installed file: $path"
       [ "$actual" = "$expected" ] || die "refusing modified file: $path"
       ;;
     link)
-      [ -L "$path" ] || die "refusing missing or replaced link: $path"
+      [ -L "$path" ] || die "refusing replaced link: $path"
       actual=$(readlink "$path") || die "could not read installed link: $path"
       [ "$actual" = "$expected" ] || die "refusing retargeted link: $path"
       ;;
-    *) die "malformed install record entry in $STATE_FILE" ;;
   esac
+  printf '%s|%s|%s\n' "$kind" "$path" "$expected" >> "$present"
 done < "$entries"
 [ "$count" -gt 0 ] || die "install record contains no files"
 
 while IFS='|' read -r kind path expected; do
   rm -f "$path" || die "could not remove verified $kind: $path"
-done < "$entries"
+done < "$present"
 rm -f "$STATE_FILE" || die "could not remove install record $STATE_FILE"
 rmdir "$STATE_DIR" 2>/dev/null || true
 
